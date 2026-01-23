@@ -567,6 +567,23 @@ def create_product(product_data: dict, background_tasks: BackgroundTasks):
         except Exception as e:
             session.rollback()
             return {"status": "error", "message": str(e)}
+def run_initial_scraping(product_name: str, product_key: str):
+    scraper = ANVISAScraper()
+    results = scraper.get_lmr_for_substance("Glifosato", product_name)
+    
+    from sqlalchemy.orm import Session
+    with Session(engine) as session:
+        product = session.query(Product).filter(Product.key == product_key).first()
+        if product and results:
+            new_lmr = LMRData(
+                product_id=product.id,
+                substance=results['substance'],
+                dest_lmr=results['lmr_mg_kg'],
+                source_authority=results['source']
+            )
+            session.add(new_lmr)
+            session.commit()
+
 @app.delete("/api/admin/products/{product_key}")
 def delete_product(product_key: str):
     from sqlalchemy.orm import Session
