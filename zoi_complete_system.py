@@ -646,14 +646,13 @@ def calculate_risk(
     
     # Importar motor de risco (assumindo que está no mesmo arquivo)
 class RiskCalculator:
- def calculate(self, product, rasff_alerts):
+    def calculate(self, product, rasff_alerts):
         score = 100.0
         rasff_penalty = min(rasff_alerts * 5, 30)
         score -= rasff_penalty
         
-        if product.direction == TradeDirectionDB.EXPORT:
-            score -= 0
-        elif product.direction == TradeDirectionDB.IMPORT:
+        # Ajuste de direção usando os valores do banco
+        if product.direction.value == "import":
             score -= 5
             
         status = "green"
@@ -680,7 +679,6 @@ def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(g
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     
-    # O cálculo agora é feito diretamente com o objeto 'product' do banco
     calc = RiskCalculator()
     result = calc.calculate(product, request.rasff_alerts_12m)
     
@@ -694,47 +692,6 @@ def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(g
             "ncm": product.ncm_code
         }
     }
-    
-    # Calcular risco engine = SentinelScore2Engine(TradeDirection(product.direction.value))
-    
-result = engine.calculate_risk_score(
-        product=product_spec,
-        rasff_data={
-            'alerts_6m': request.rasff_alerts_6m,
-            'alerts_12m': request.rasff_alerts_12m
-        },
-        lmr_data=request.lmr_data,
-        phyto_data={'alerts': request.phyto_alerts},
-        transport_data={'days': request.transport_days or product.transport_days_avg}
-    )
-    
-    # Salvar avaliação no banco
-assessment = RiskAssessment(
-        product_id=product.id,
-        final_score=result['score'],
-        status=RiskStatusDB(result['status']),
-        rasff_score=result['components']['rasff_score'],
-        lmr_score=result['components']['lmr_score'],
-        phyto_score=result['components']['phyto_score'],
-        logistic_score=result['components']['logistic_score'],
-        penalty=result['components']['penalty'],
-        rasff_alerts_6m=request.rasff_alerts_6m,
-        rasff_alerts_12m=request.rasff_alerts_12m,
-        recommendations=result['recommendations']
-    )
-    
-db.add(assessment)
-db.commit()
-    
-    # Enviar notificações em background se score > threshold
-if result['score'] > 65:
-        background_tasks.add_task(
-            send_risk_notifications,
-            product_key=request.product_key,
-            score=result['score'],
-            status=result['status']
-        )
-        result
 
 
 @app.post("/api/users", status_code=status.HTTP_201_CREATED)
