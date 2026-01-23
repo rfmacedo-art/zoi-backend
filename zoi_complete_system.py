@@ -676,9 +676,11 @@ class RiskCalculator:
 @app.post("/api/risk/calculate")
 def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(get_db)):
     product = db.query(Product).filter(Product.key == request.product_key).first()
+    
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     
+    # O cálculo agora é feito diretamente com o objeto 'product' do banco
     calc = RiskCalculator()
     result = calc.calculate(product, request.rasff_alerts_12m)
     
@@ -687,26 +689,11 @@ def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(g
         "status": result["status"],
         "components": result["components"],
         "recommendations": result["recommendations"],
-        "product_info": {"name": product.name_pt, "ncm": product.ncm_code}
+        "product_info": {
+            "name": product.name_pt, 
+            "ncm": product.ncm_code
         }
-    
-       # Converter para ProductSpec
-product_spec = ProductSpec(
-        name_pt=product.name_pt,
-        name_it=product.name_it,
-        name_en=product.name_en or "",
-        ncm_code=product.ncm_code,
-        hs_code=product.hs_code,
-        taric_code=product.taric_code,
-        state=ProductState(product.state.value),
-        shelf_life_days=product.shelf_life_days,
-        transport_days_avg=product.transport_days_avg,
-        temperature_min_c=product.temperature_min_c,
-        temperature_max_c=product.temperature_max_c,
-        requires_phytosanitary_cert=product.requires_phytosanitary_cert,
-        requires_health_cert=product.requires_health_cert,
-        critical_substances=product.critical_substances or []
-    )
+    }
     
     # Calcular risco engine = SentinelScore2Engine(TradeDirection(product.direction.value))
     
