@@ -1,6 +1,6 @@
 """
 ZOI Trade Advisory - Complete Production System
-Version 2.0 - Full Stack Implementation
+Version 2.0 - Full Stack Implementation with Intelligent Monitoring
 """
 
 import re
@@ -172,12 +172,19 @@ class ANVISAScraper:
         })
     
     def get_lmr_for_substance(self, substance: str, crop: str) -> Optional[Dict]:
+        print(f"🔍 Buscando LMR para {substance} × {crop}...")
+        
         try:
             search_url = f"{self.MONOGRAFIA_URL}?ingrediente={substance.lower()}"
-            response = self.session.get(search_url, timeout=10)
+            
+            print(f"🌐 Acessando ANVISA: {search_url}")
+            response = self.session.get(search_url, timeout=15)
             
             if response.status_code != 200:
-                return None
+                print(f"⚠️  ANVISA retornou status {response.status_code} - usando fallback")
+                result = self._get_fallback_lmr(substance, crop)
+                result['source'] = 'PRESUMIDO - AGUARDANDO ATUALIZAÇÃO'
+                return result
             
             soup = BeautifulSoup(response.content, 'html.parser')
             lmr_table = soup.find('table', {'class': 'lmr-table'})
@@ -186,6 +193,7 @@ class ANVISAScraper:
                 lmr_table = soup.find('table', string=re.compile('Limite Máximo'))
             
             if lmr_table:
+                print(f"📊 Tabela LMR encontrada, processando...")
                 rows = lmr_table.find_all('tr')
                 
                 for row in rows:
@@ -199,6 +207,7 @@ class ANVISAScraper:
                             lmr_value = self._extract_number(lmr_text)
                             
                             if lmr_value is not None:
+                                print(f"✅ LMR oficial encontrado: {lmr_value} mg/kg")
                                 return {
                                     'substance': substance,
                                     'crop': crop,
@@ -207,32 +216,58 @@ class ANVISAScraper:
                                     'url': search_url
                                 }
             
-            return self._get_fallback_lmr(substance, crop)
+            print(f"⚠️  Dados não encontrados na ANVISA - usando valores presumidos")
+            result = self._get_fallback_lmr(substance, crop)
+            result['source'] = 'PRESUMIDO - AGUARDANDO ATUALIZAÇÃO'
+            return result
+            
+        except requests.Timeout:
+            print(f"⏱️  Timeout ao acessar ANVISA - usando fallback")
+            result = self._get_fallback_lmr(substance, crop)
+            result['source'] = 'PRESUMIDO - AGUARDANDO ATUALIZAÇÃO'
+            return result
             
         except Exception as e:
-            return self._get_fallback_lmr(substance, crop)
+            print(f"❌ Erro ao processar ANVISA ({e}) - usando fallback")
+            result = self._get_fallback_lmr(substance, crop)
+            result['source'] = 'PRESUMIDO - AGUARDANDO ATUALIZAÇÃO'
+            return result
     
     def _extract_number(self, text: str) -> Optional[float]:
         match = re.search(r'(\d+\.?\d*)', text.replace(',', '.'))
         return float(match.group(1)) if match else None
     
     def _get_fallback_lmr(self, substance: str, crop: str) -> Dict:
+        print(f"📋 Usando base de dados interna para {substance} × {crop}")
+        
         fallback_data = {
             ('Glifosato', 'Soja'): 10.0,
             ('Glifosato', 'Café'): 1.0,
+            ('Glifosato', 'Grãos'): 10.0,
             ('Carbendazim', 'Laranja'): 2.0,
             ('Carbendazim', 'Café'): 0.1,
             ('Clorpirifós', 'Soja'): 0.5,
             ('Tiabendazol', 'Laranja'): 5.0,
+            ('Genérico', 'Carne'): 0.05,
+            ('Genérico', 'Suco'): 0.5,
+            ('Genérico', 'Polpa'): 0.3,
+            ('Genérico', 'Mel'): 0.1,
         }
         
         lmr = fallback_data.get((substance, crop), 1.0)
+        
+        for key, value in fallback_data.items():
+            if crop.lower() in key[1].lower():
+                lmr = value
+                break
+        
+        print(f"💾 Valor presumido: {lmr} mg/kg")
         
         return {
             'substance': substance,
             'crop': crop,
             'lmr_mg_kg': lmr,
-            'source': 'ANVISA_FALLBACK',
+            'source': 'FALLBACK',
             'url': self.MONOGRAFIA_URL
         }
 
@@ -343,11 +378,15 @@ def root():
 
 
 @app.get("/api/admin/seed-database")
-def seed_database():
+def seed_database(background_tasks: BackgroundTasks):
     from sqlalchemy.orm import Session
+    
+    print("🔄 Iniciando seed do banco de dados...")
     
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    
+    print("✅ Tabelas criadas com sucesso")
     
     with Session(engine) as session:
         products_list = [
@@ -362,7 +401,10 @@ def seed_database():
             {"key": "limao_siciliano", "name": "Limão Siciliano", "ncm": "08055000", "dir": "import", "state": "ambient"}
         ]
         
+        created_products = []
+        
         for item in products_list:
+            print(f"📦 Criando produto: {item['name']}")
             new_p = Product(
                 key=item["key"],
                 name_pt=item["name"],
@@ -374,11 +416,23 @@ def seed_database():
                 requires_phytosanitary_cert=True
             )
             session.add(new_p)
+            session.flush()
+            created_products.append((new_p.name_pt, new_p.key))
         
         session.commit()
         total = session.query(Product).count()
         
-    return {"status": "success", "total": total}
+        print(f"✅ {total} produtos criados no banco")
+    
+    print("🚀 Iniciando auditoria assíncrona em segundo plano...")
+    for product_name, product_key in created_products:
+        background_tasks.add_task(run_initial_scraping, product_name, product_key)
+    
+    return {
+        "status": "success", 
+        "total": total,
+        "message": f"{total} produtos criados. Auditoria ANVISA iniciada em segundo plano."
+    }
 
 
 @app.get("/api/products")
@@ -399,35 +453,67 @@ def get_product(product_key: str, db: SessionLocal = Depends(get_db)):
 
 
 def run_initial_scraping(product_name: str, product_key: str):
+    print(f"\n{'='*60}")
+    print(f"🔬 AUDITORIA ANVISA: {product_name}")
+    print(f"{'='*60}")
+    
     try:
         scraper = ANVISAScraper()
-        results = scraper.get_lmr_for_substance("Glifosato", product_name)
         
-        from sqlalchemy.orm import Session
-        with Session(engine) as session:
-            product = session.query(Product).filter(Product.key == product_key).first()
-            if product:
-                new_lmr = LMRData(
-                    product_id=product.id,
-                    substance=results['substance'] if results else "Auditoria Geral",
-                    dest_lmr=results['lmr_mg_kg'] if results else 0.0,
-                    source_authority="ANVISA/ZOI Sentinel"
-                )
-                session.add(new_lmr)
-                session.commit()
+        substances = ["Glifosato", "Genérico"]
+        
+        for substance in substances:
+            print(f"\n🧪 Testando substância: {substance}")
+            results = scraper.get_lmr_for_substance(substance, product_name)
+            
+            if results:
+                from sqlalchemy.orm import Session
+                with Session(engine) as session:
+                    product = session.query(Product).filter(Product.key == product_key).first()
+                    
+                    if product:
+                        existing_lmr = session.query(LMRData).filter(
+                            LMRData.product_id == product.id,
+                            LMRData.substance == results['substance']
+                        ).first()
+                        
+                        if not existing_lmr:
+                            new_lmr = LMRData(
+                                product_id=product.id,
+                                substance=results['substance'],
+                                dest_lmr=results['lmr_mg_kg'],
+                                source_authority=results.get('source', 'ANVISA')
+                            )
+                            session.add(new_lmr)
+                            session.commit()
+                            
+                            print(f"💾 LMR salvo no banco: {results['substance']} = {results['lmr_mg_kg']} mg/kg")
+                            print(f"📍 Fonte: {results.get('source', 'ANVISA')}")
+                        else:
+                            print(f"ℹ️  LMR já existe no banco para {results['substance']}")
+                
+                break
+        
+        print(f"\n✅ Auditoria concluída para {product_name}")
+        print(f"{'='*60}\n")
+        
     except Exception as e:
-        print(f"Erro na auditoria: {e}")
+        print(f"\n❌ Erro na auditoria de {product_name}: {e}")
+        print(f"{'='*60}\n")
 
 
 @app.post("/api/admin/products")
 def create_product(product_data: dict, background_tasks: BackgroundTasks):
     from sqlalchemy.orm import Session
+    
+    print(f"\n📝 Criando novo produto: {product_data.get('name_pt', 'N/A')}")
+    
     with Session(engine) as session:
         try:
             new_p = Product(
                 key=product_data["key"],
                 name_pt=product_data["name_pt"],
-                name_it=product_data["name_pt"],
+                name_it=product_data.get("name_it", product_data["name_pt"]),
                 ncm_code=product_data["ncm_code"],
                 hs_code=product_data["ncm_code"][:6],
                 direction=TradeDirectionDB(product_data["direction"]),
@@ -437,22 +523,39 @@ def create_product(product_data: dict, background_tasks: BackgroundTasks):
             session.add(new_p)
             session.commit()
             session.refresh(new_p)
+            
+            print(f"✅ Produto '{new_p.name_pt}' criado com ID {new_p.id}")
+            print(f"🚀 Iniciando auditoria ANVISA em segundo plano...")
+            
             background_tasks.add_task(run_initial_scraping, new_p.name_pt, new_p.key)
-            return {"status": "success", "message": "Produto criado e auditoria iniciada"}
+            
+            return {
+                "status": "success", 
+                "message": f"Produto '{new_p.name_pt}' criado com sucesso. Auditoria ANVISA iniciada em segundo plano.",
+                "product_key": new_p.key
+            }
+            
         except Exception as e:
             session.rollback()
+            print(f"❌ Erro ao criar produto: {e}")
             return {"status": "error", "message": str(e)}
 
 
 @app.delete("/api/admin/products/{product_key}")
 def delete_product(product_key: str):
     from sqlalchemy.orm import Session
+    
+    print(f"🗑️  Removendo produto: {product_key}")
+    
     with Session(engine) as session:
         product = session.query(Product).filter(Product.key == product_key).first()
         if product:
             session.delete(product)
             session.commit()
+            print(f"✅ Produto {product_key} removido com sucesso")
             return {"status": "success", "message": f"Produto {product_key} removido"}
+        
+        print(f"⚠️  Produto {product_key} não encontrado")
         return {"status": "error", "message": "Produto não encontrado"}
 
 
@@ -571,8 +674,13 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
 if __name__ == "__main__":
     import uvicorn
     
+    print("🚀 Iniciando ZOI Trade Advisory System...")
+    print("📊 Criando tabelas do banco de dados...")
+    
     Base.metadata.create_all(bind=engine)
-    print("✓ Banco de dados inicializado")
+    
+    print("✅ Banco de dados inicializado com sucesso")
+    print(f"🌐 Servidor disponível em: http://0.0.0.0:{os.environ.get('PORT', 8000)}")
     
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
