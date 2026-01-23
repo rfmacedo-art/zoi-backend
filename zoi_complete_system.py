@@ -501,6 +501,44 @@ def get_products():
     
     return products
 
+# ============================================================================
+# ROTAS DE ADMINISTRAÇÃO (POST E DELETE)
+# ============================================================================
+
+@app.post("/api/admin/products")
+def create_product(product_data: dict):
+    from sqlalchemy.orm import Session
+    with Session(engine) as session:
+        try:
+            # O Lovable enviará os dados via formulário
+            new_p = Product(
+                key=product_data["key"],
+                name_pt=product_data["name_pt"],
+                name_it=product_data["name_pt"], # Por enquanto repetimos o PT no IT
+                ncm_code=product_data["ncm_code"],
+                hs_code=product_data["ncm_code"][:6],
+                direction=TradeDirectionDB(product_data["direction"]),
+                state=ProductStateDB(product_data["state"]),
+                requires_phytosanitary_cert=product_data.get("requires_phytosanitary_cert", True)
+            )
+            session.add(new_p)
+            session.commit()
+            return {"status": "success", "message": f"Produto {new_p.key} criado com sucesso!"}
+        except Exception as e:
+            session.rollback()
+            return {"status": "error", "message": str(e)}
+
+@app.delete("/api/admin/products/{product_key}")
+def delete_product(product_key: str):
+    from sqlalchemy.orm import Session
+    with Session(engine) as session:
+        product = session.query(Product).filter(Product.key == product_key).first()
+        if product:
+            session.delete(product)
+            session.commit()
+            return {"status": "success", "message": f"Produto {product_key} removido"}
+        return {"status": "error", "message": "Produto não encontrado"}
+
 # --- NOVAS ROTAS DE ADMIN PARA O DASHBOARD ---
 
 @app.post("/api/admin/products")
