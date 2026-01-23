@@ -461,8 +461,11 @@ def seed_database():
  
 @app.get("/api/products")
 def get_products(db: SessionLocal = Depends(get_db)):
-    products = db.query(Product).all()
-    return products
+    try:
+        products = db.query(Product).all()
+        return products
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/products/{product_key}")
 def get_product(product_key: str, db: SessionLocal = Depends(get_db)):
@@ -1462,11 +1465,8 @@ if __name__ == "__main__":
     import uvicorn
     import os
     
-    try:
-        Base.metadata.create_all(bind=engine)
-    except Exception as e:
-        pass
-
-    port = int(os.environ.get("PORT", 8000))
+    # Inicializa tabelas de forma segura
+    Base.metadata.create_all(bind=engine)
     
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
