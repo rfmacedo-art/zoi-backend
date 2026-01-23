@@ -501,7 +501,41 @@ def get_products():
     
     return products
 
+# --- NOVAS ROTAS DE ADMIN PARA O DASHBOARD ---
 
+@app.post("/api/admin/products")
+def create_product(product_data: dict):
+    from sqlalchemy.orm import Session
+    with Session(engine) as session:
+        try:
+            new_p = Product(
+                key=product_data["key"],
+                name_pt=product_data["name"],
+                name_it=product_data["name"],
+                ncm_code=product_data["ncm"],
+                hs_code=product_data["ncm"][:6],
+                direction=TradeDirectionDB(product_data["direction"]),
+                state=ProductStateDB(product_data["state"]),
+                requires_phytosanitary_cert=True
+            )
+            session.add(new_p)
+            session.commit()
+            return {"status": "success", "message": f"Produto {new_p.key} cadastrado!"}
+        except Exception as e:
+            session.rollback()
+            return {"status": "error", "message": str(e)}
+
+@app.delete("/api/admin/products/{product_key}")
+def delete_product(product_key: str):
+    from sqlalchemy.orm import Session
+    with Session(engine) as session:
+        product = session.query(Product).filter(Product.key == product_key).first()
+        if product:
+            session.delete(product)
+            session.commit()
+            return {"status": "success", "message": "Produto removido"}
+        return {"status": "error", "message": "Produto não encontrado"}
+    
 @app.get("/api/products/{product_key}", response_model=ProductResponse)
 def get_product(product_key: str, db: SessionLocal = Depends(get_db)):
     """Retorna detalhes de um produto específico"""
