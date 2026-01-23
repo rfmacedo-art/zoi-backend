@@ -1344,25 +1344,23 @@ def export_data(output):
 
 
 # ============================================================================
-# 10. MAIN APPLICATION RUNNER (CORRIGIDO PARA RENDER)
+# 10. MAIN APPLICATION RUNNER (CORRIGIDO E ALINHADO)
 # ============================================================================
 
 def run_api_server():
-    """Inicia servidor FastAPI com Porta Dinâmica"""
+    """Inicia servidor FastAPI com ajustes para o Render"""
     import uvicorn
     import os
     
-    # Inicializar scheduler (Opcional: você pode comentar se não tiver Redis configurado)
+    # Criar tabelas antes de iniciar
     try:
-        scheduler = ScheduledTasks()
-        scheduler.start()
+        Base.metadata.create_all(bind=engine)
+        print("✓ Banco de dados inicializado.")
     except Exception as e:
-        print(f"Aviso: Scheduler não iniciado (Redis pode estar offline): {e}")
-    
-    # PEGA A PORTA QUE O RENDER MANDA (ESSENCIAL)
+        print(f"⚠ Erro no DB: {e}")
+
+    # PORTA DINÂMICA DO RENDER
     port = int(os.environ.get("PORT", 8000))
-    
-    print(f"🚀 ZOI API ONLINE NA PORTA: {port}")
     
     uvicorn.run(
         app,
@@ -1370,10 +1368,7 @@ def run_api_server():
         port=port,
         log_level="info"
     )
-    if __name__ == "__main__":
-    import sys
 
-    init_database()
-
-    print("Run with: uvicorn zoi_complet_sistem:app")
+if __name__ == "__main__":
+    run_api_server()
     
