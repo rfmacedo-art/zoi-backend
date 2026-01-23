@@ -221,36 +221,15 @@ class Product(Base):
     risk_assessments = relationship("RiskAssessment", back_populates="product")
     lmr_data = relationship("LMRData", back_populates="product")
 
+import os
 
-class RiskAssessment(Base):
-    """Tabela de avaliações de risco"""
-    __tablename__ = 'risk_assessments'
-    
-    id = Column(Integer, primary_key=True)
-    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
-    
-    # Scores
-    final_score = Column(Float, nullable=False)
-    status = Column(SQLEnum(RiskStatusDB), nullable=False)
-    
-    # Componentes
-    rasff_score = Column(Float)
-    lmr_score = Column(Float)
-    phyto_score = Column(Float)
-    logistic_score = Column(Float)
-    penalty = Column(Float)
-    
-    # Dados de entrada
-    rasff_alerts_6m = Column(Integer)
-    rasff_alerts_12m = Column(Integer)
-    
-    # Metadados
-    calculation_timestamp = Column(DateTime, default=datetime.utcnow)
-    recommendations = Column(JSON)
-    
-    # Relacionamentos
-    product = relationship("Product", back_populates="risk_assessments")
+DATABASE_URL = "postgresql://zoi_user:IN3LI5N6OshhlVIDetxmCXhX01es3nK8@dpg-d5pkoeer433s73ddm970-a/zoi_db"
 
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class LMRData(Base):
     """Tabela de dados de LMR (Limite Máximo de Resíduos)"""
