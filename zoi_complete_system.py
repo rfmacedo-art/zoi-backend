@@ -628,49 +628,32 @@ def run_initial_scraping(product_name: str, product_key: str):
     except Exception as e:
         print(f"Erro na auditoria: {e}")
 
-@app.post("/api/risk/calculate", response_model=RiskCalculationResponse)
-def calculate_risk(
-    request: RiskCalculationRequest,
-    background_tasks: BackgroundTasks,
-    db: SessionLocal = Depends(get_db)
-):
-    """
-    Calcula Risk Score para um produto
-    """
-    
-    # Buscar produto
+@app.post("/api/risk/calculate")
+def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(get_db)):
     product = db.query(Product).filter(Product.key == request.product_key).first()
     
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     
-    # Importar motor de risco (assumindo que está no mesmo arquivo)
-class RiskCalculator:
-    def calculate(self, product, rasff_alerts):
-        score = 100.0
-        rasff_penalty = min(rasff_alerts * 5, 30)
-        score -= rasff_penalty
-        
-        # Ajuste de direção usando os valores do banco
-        if product.direction.value == "import":
-            score -= 5
-            
-        status = "green"
-        if score < 50: status = "red"
-        elif score < 75: status = "yellow"
-        
-        return {
-            "score": round(max(score, 0), 1),
-            "status": status,
-            "components": {
-                "rasff_score": 100 - rasff_penalty,
-                "lmr_score": 95.0,
-                "phyto_score": 100.0,
-                "logistic_score": 100.0,
-                "penalty": 0.0
-            },
-            "recommendations": ["Auditoria automatizada concluída", "Verificar certificados de origem"]
+    calc = RiskCalculator()
+    result = calc.calculate(product, request.rasff_alerts_12m)
+    
+    return {
+        "score": float(result["score"]),
+        "status": str(result["status"]),
+        "components": {
+            "rasff_score": float(result["components"]["rasff_score"]),
+            "lmr_score": float(result["components"]["lmr_score"]),
+            "phyto_score": float(result["components"]["phyto_score"]),
+            "logistic_score": float(result["components"]["logistic_score"]),
+            "penalty": float(result["components"]["penalty"])
+        },
+        "recommendations": [str(r) for r in result["recommendations"]],
+        "product_info": {
+            "name": str(product.name_pt), 
+            "ncm": str(product.ncm_code)
         }
+    }
 
 @app.post("/api/risk/calculate")
 def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(get_db)):
