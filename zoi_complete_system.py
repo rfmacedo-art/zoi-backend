@@ -322,6 +322,7 @@ def init_database():
 # ============================================================================
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
@@ -542,27 +543,30 @@ def delete_product(product_key: str):
 # --- NOVAS ROTAS DE ADMIN PARA O DASHBOARD ---
 
 @app.post("/api/admin/products")
-def create_product(product_data: dict):
+def create_product(product_data: dict, background_tasks: BackgroundTasks):
     from sqlalchemy.orm import Session
     with Session(engine) as session:
         try:
             new_p = Product(
                 key=product_data["key"],
-                name_pt=product_data["name"],
-                name_it=product_data["name"],
-                ncm_code=product_data["ncm"],
-                hs_code=product_data["ncm"][:6],
+                name_pt=product_data["name_pt"],
+                name_it=product_data["name_pt"],
+                ncm_code=product_data["ncm_code"],
+                hs_code=product_data["ncm_code"][:6],
                 direction=TradeDirectionDB(product_data["direction"]),
                 state=ProductStateDB(product_data["state"]),
                 requires_phytosanitary_cert=True
             )
             session.add(new_p)
             session.commit()
-            return {"status": "success", "message": f"Produto {new_p.key} cadastrado!"}
+            session.refresh(new_p)
+
+            background_tasks.add_task(run_initial_scraping, new_p.name_pt, new_p.key)
+            
+            return {"status": "success", "message": f"Produto {new_p.key} criado e auditoria iniciada"}
         except Exception as e:
             session.rollback()
             return {"status": "error", "message": str(e)}
-
 @app.delete("/api/admin/products/{product_key}")
 def delete_product(product_key: str):
     from sqlalchemy.orm import Session
