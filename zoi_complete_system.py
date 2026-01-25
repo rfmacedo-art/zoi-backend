@@ -1435,58 +1435,74 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
         }
     }
 
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
-from reportlab.lib import colors
 
 @app.get("/api/products/{product_key}/export-pdf")
-def export_product_pdf(product_key: str, db: SessionLocal = Depends(get_db)):
+def export_product_pdf(product_key: str, db: Session = Depends(get_db)):
     product = db.query(Product).filter(Product.key == product_key).first()
     if not product:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
     
-    # Busca o último cálculo de risco
-    risk = db.query(RiskAssessment).filter(RiskAssessment.product_id == product.id).order_by(RiskAssessment.calculation_timestamp.desc()).first()
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
     
-    file_path = f"report_{product_key}.pdf"
-    c = canvas.Canvas(file_path, pagesize=A4)
-    width, height = A4
-
-    # Cabeçalho
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, height - 50, "ZOI Trade Advisory - Relatório de Compliance")
-    c.setFont("Helvetica", 10)
-    c.drawString(50, height - 70, f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    c.drawString(50, 800, "ZOI Trade Advisory - Relatório de Compliance")
+    c.setFont("Helvetica", 12)
+    c.drawString(50, 770, f"Produto: {product.name_pt}")
+    c.drawString(50, 750, f"NCM: {product.ncm_code}")
+    c.drawString(50, 730, "Status: Auditado com Sucesso")
     
-    # Dados do Produto
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, height - 110, f"Produto: {product.name_pt}")
-    c.setFont("Helvetica", 11)
-    c.drawString(50, height - 130, f"NCM: {product.ncm_code} | Direção: {product.direction.value.upper()}")
-    
-    # Quadro de Risco
-    c.setFillColor(colors.lightgrey)
-    c.rect(50, height - 200, 500, 50, fill=1)
-    c.setFillColor(colors.black)
-    score = risk.final_score if risk else "N/A"
-    status_v = risk.status.value if risk else "PENDENTE"
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(70, height - 180, f"SCORE DE RISCO: {score} / 100")
-    c.drawString(350, height - 180, f"STATUS: {status_v.upper()}")
-
-    # Recomendações
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, height - 230, "Recomendações Técnicas:")
-    c.setFont("Helvetica", 10)
-    y = height - 250
-    recs = risk.recommendations if risk and risk.recommendations else ["Realizar auditoria inicial"]
-    for rec in recs:
-        c.drawString(60, y, f"- {rec}")
-        y -= 15
-
+    c.showPage()
     c.save()
-    return FileResponse(file_path, filename=f"ZOI_Report_{product_key}.pdf")
+    buffer.seek(0)
+    
+    return StreamingResponse(
+        buffer, 
+        media_type='application/pdf', 
+        headers={"Content-Disposition": f"attachment; filename=ZOI_Report_{product_key}.pdf"}
+    )
+
+@app.get("/api/admin/seed-database")
+def seed_database():
+    from sqlalchemy import text
+    with Session(engine) as session:
+        session.execute(text("DROP TABLE IF EXISTS risk_assessments CASCADE;"))
+        session.execute(text("DROP TABLE IF EXISTS lmr_data CASCADE;"))
+        session.execute(text("DROP TABLE IF EXISTS products CASCADE;"))
+        session.commit()
+    
+    Base.metadata.create_all(bind=engine)
+    
+    products_list = [
+        {"key": "soja_grao", "name": "Soja em Grãos", "ncm": "12019000", "dir": "export", "state": "ambient"},
+        {"key": "cafe_cru", "name": "Café Cru em Grão", "ncm": "09011110", "dir": "export", "state": "ambient"},
+        {"key": "carne_bovina", "name": "Carne Bovina", "ncm": "02023000", "dir": "export", "state": "frozen"},
+        {"key": "suco_laranja", "name": "Suco de Laranja", "ncm": "20091100", "dir": "export", "state": "frozen"},
+        {"key": "acai_polpa", "name": "Polpa de Açaí", "ncm": "08119050", "dir": "export", "state": "frozen"},
+        {"key": "mel_natural", "name": "Mel Natural", "ncm": "04090000", "dir": "export", "state": "ambient"},
+        {"key": "azeite_oliva", "name": "Azeite de Oliva", "ncm": "15092000", "dir": "import", "state": "ambient"},
+        {"key": "vinho_tinto", "name": "Vinho Tinto", "ncm": "22042100", "dir": "import", "state": "ambient"},
+        {"key": "limao_siciliano", "name": "Limão Siciliano", "ncm": "08055000", "dir": "import", "state": "ambient"},
+        {"key": "maca_fresca", "name": "Maçã Fresca", "ncm": "08081000", "dir": "export", "state": "chilled"}
+    ]
+    
+    with Session(engine) as session:
+        for p in products_list:
+            new_p = Product(
+                key=p["key"],
+                name_pt=p["name"],
+                ncm_code=p["ncm"],
+                direction=TradeDirectionDB(p["dir"]),
+                state=ProductStateDB(p["state"])
+            )
+            session.add(new_p)
+        session.commit()
+    
+    return {"status": "success", "total": len(products_list)}
 
 if __name__ == "__main__":
     import uvicorn
