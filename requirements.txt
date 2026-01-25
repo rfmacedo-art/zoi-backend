@@ -18,3 +18,4 @@ python-dotenv
 email-validator
 reportlab==4.0.4
 weasyprint==59.0
+reportlab==4.0.7
