@@ -1437,15 +1437,6 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    
-    print("🚀 Iniciando ZOI Trade Advisory System - Commercial Phase")
-    print("📊 Criando tabelas do banco de dados...")
-    
     Base.metadata.create_all(bind=engine)
-    
-    print("✅ Banco de dados inicializado com sucesso")
-    print(f"🌐 Servidor disponível em: http://0.0.0.0:{os.environ.get('PORT', 8000)}")
-    print("📄 Endpoint PDF: /api/products/{{key}}/export-pdf")
-    
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
