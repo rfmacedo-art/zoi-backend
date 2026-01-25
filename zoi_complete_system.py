@@ -493,34 +493,30 @@ app.add_middleware(
 def export_risk_pdf(product_key: str):
     """
     Exportação PDF Premium v3.0 - ZOI Trade Advisory
-    Inclui Gráfico de Radar, Glossário Bilíngue e Assinatura Digital.
+    Versão integrada ao sistema completo.
     """
     from io import BytesIO
     from datetime import datetime
-    from fastapi import Response
-    
-    # Imports específicos do ReportLab para gráficos e layout
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import cm
     from reportlab.lib import colors
-    from reportlab.graphics.shapes import Drawing, String as ShapeString, Polygon, Line, Circle
+    from reportlab.graphics.shapes import Drawing
     from reportlab.graphics.charts.spiderplots import SpiderPlot
     from reportlab.graphics import renderPDF
 
     db = SessionLocal()
     try:
-        # 1. Busca de Dados
+        # Busca o produto no banco de dados existente
         product = db.query(Product).filter(Product.key == product_key).first()
         if not product:
             return Response(content="Produto nao encontrado", status_code=404)
 
-        # Simulação de scores (caso não haja uma avaliação no banco, usamos valores padrão para o radar)
-        # Em produção, você pode buscar de assessment = db.query(RiskAssessment)...
+        # Notas simuladas para o gráfico de radar (Baseadas no seu Risk Report anterior)
         scores = {
-            "Sanitário": 48.0,
-            "Fitossanitário": 82.0,
-            "Logístico": 92.0,
+            "Sanitário": 48.0, 
+            "Fitossanitário": 82.0, 
+            "Logístico": 92.0, 
             "Documental": 82.0
         }
 
@@ -528,99 +524,62 @@ def export_risk_pdf(product_key: str):
         c = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
 
-        # --- ESTÉTICA: HEADER PREMIUM ---
-        c.setFillColorRGB(0.12, 0.25, 0.68)  # Azul Marinho #1F3FAD
+        # --- ESTÉTICA: HEADER ---
+        c.setFillColorRGB(0.12, 0.25, 0.68) # Azul ZOI
         c.rect(0, height - 3.5*cm, width, 3.5*cm, fill=True, stroke=False)
-        
         c.setFillColor(colors.white)
-        c.setFont("Helvetica-Bold", 22)
+        c.setFont("Helvetica-Bold", 20)
         c.drawString(1.5*cm, height - 2*cm, "ZOI TRADE ADVISORY")
         c.setFont("Helvetica", 10)
-        c.drawString(1.5*cm, height - 2.6*cm, "INTERNATIONAL COMPLIANCE & RISK ASSESSMENT REPORT")
+        c.drawString(1.5*cm, height - 2.6*cm, "Dossiê de Compliance e Análise Multidimensional de Risco")
 
-        # --- SEÇÃO: INFORMAÇÕES DO PRODUTO ---
+        # --- INFO PRODUTO ---
         c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(1.5*cm, height - 5*cm, f"Dossiê Técnico: {product.name_pt.upper()}")
-        
-        c.setFont("Helvetica", 10)
-        c.setFillColorRGB(0.3, 0.3, 0.3)
-        info_y = height - 5.8*cm
-        c.drawString(1.5*cm, info_y, f"NCM: {product.ncm_code}  |  Origem: Brasil  |  Destino: Itália (UE)")
-        c.drawString(1.5*cm, info_y - 0.5*cm, f"Data de Emissão: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-
-        # --- GRÁFICO DE RADAR (SPIDER CHART) ---
         c.setFont("Helvetica-Bold", 12)
-        c.setFillColorRGB(0.12, 0.25, 0.68)
-        c.drawString(1.5*cm, height - 8*cm, "ANÁLISE MULTIDIMENSIONAL DE RISCO")
+        c.drawString(1.5*cm, height - 5*cm, f"PRODUTO: {product.name_pt.upper()}")
+        c.setFont("Helvetica", 10)
+        c.drawString(1.5*cm, height - 5.6*cm, f"NCM: {product.ncm_code} | Origem: BR | Destino: IT")
 
-        # Criando o desenho para o radar
+        # --- GRÁFICO DE RADAR ---
+        # Criamos o container do gráfico
         d = Drawing(400, 200)
         sp = SpiderPlot()
-        sp.x = 100
-        sp.y = 20
-        sp.width = 150
-        sp.height = 150
+        sp.x, sp.y = 90, 10
+        sp.width, sp.height = 160, 160
         sp.maxValue = 100
-        
-        # Dados do Radar (notas do sistema)
         sp.data = [list(scores.values())]
         sp.labels = list(scores.keys())
-        
-        # Cores e Estilo do Radar
         sp.strands[0].strokeColor = colors.HexColor("#1F3FAD")
-        sp.strands[0].fillColor = colors.HexColor("#1F3FAD66") # Com transparência
-        sp.strands.strokeWidth = 2
-        sp.spokeLabels.fontName = 'Helvetica'
-        sp.spokeLabels.fontSize = 9
-        
+        sp.strands[0].fillColor = colors.HexColor("#1F3FAD66")
         d.add(sp)
-        renderPDF.draw(d, c, 1.5*cm, height - 13.5*cm)
+        renderPDF.draw(d, c, 1.5*cm, height - 13*cm)
 
-        # --- GLOSSÁRIO TÉCNICO (ITALIANO/PORTUGUÊS) ---
-        glossary_y = height - 16*cm
-        c.setStrokeColorRGB(0.9, 0.9, 0.9)
-        c.line(1.5*cm, glossary_y + 0.5*cm, width - 1.5*cm, glossary_y + 0.5*cm)
-        
+        # --- GLOSSÁRIO TÉCNICO ---
+        c.setFont("Helvetica-Bold", 10)
         c.setFillColorRGB(0.12, 0.25, 0.68)
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(1.5*cm, glossary_y, "GLOSSARIO TECNICO PER L'IMPORTATORE")
+        c.drawString(1.5*cm, 7*cm, "GLOSSARIO TECNICO (IT/PT)")
         
         c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 9)
-        items = [
-            ("LMR (Limite Máximo de Resíduos):", "Spiegazione tecnica dei limiti chimici UE per i pesticidi."),
-            ("RASFF:", "Sistema di allerta rapida dell'Unione Europea per rischi alimentari."),
-            ("FITOSSANITÁRIO:", "Certificazione di conformità alle norme di protezione delle piante."),
-            ("COMPLIANCE SCORE:", "Indice ZOI basato su dati storici di rigetto e analisi correnti.")
+        c.setFont("Helvetica", 8)
+        glossario = [
+            "RASFF: Sistema di allerta rapida UE / Sistema de alerta rápido para riscos alimentares.",
+            "LMR: Limite Massimo Residui / Limite Máximo de Resíduos químicos permitidos.",
+            "FITOSSANITÁRIO: Conformità alle norme di protezione delle piante / Proteção contra pragas."
         ]
-        
-        curr_y = glossary_y - 0.6*cm
-        for title, desc in items:
-            c.setFont("Helvetica-Bold", 8)
-            c.drawString(1.5*cm, curr_y, title)
-            c.setFont("Helvetica", 8)
-            c.drawString(6*cm, curr_y, desc)
-            curr_y -= 0.4*cm
+        y_text = 6.5*cm
+        for item in glossario:
+            c.drawString(1.5*cm, y_text, item)
+            y_text -= 0.4*cm
 
-        # --- CAMPO DE ASSINATURA DIGITAL ---
-        c.setFillColorRGB(0.94, 0.95, 0.96) # Cinza Profissional #F0F2F5
-        c.rect(1.5*cm, 2*cm, width - 3*cm, 2.5*cm, fill=True, stroke=False)
-        
-        c.setFillColorRGB(0.2, 0.2, 0.2)
+        # --- ASSINATURA DIGITAL ---
+        c.setStrokeColorRGB(0.8, 0.8, 0.8)
+        c.rect(1.5*cm, 2*cm, width - 3*cm, 2.5*cm, stroke=True, fill=False)
         c.setFont("Helvetica-Bold", 8)
-        c.drawString(2*cm, 4*cm, "VALIDADO DIGITALMENTE POR ZOI TRADE ADVISORY COMPLIANCE SYSTEM")
+        c.drawString(2*cm, 4*cm, "VALIDADO DIGITALMENTE POR ZOI COMPLIANCE SYSTEM")
         c.setFont("Helvetica", 7)
-        c.drawString(2*cm, 3.6*cm, f"ID de Autenticação: {product_key.upper()}-{int(datetime.now().timestamp())}")
-        c.drawString(2*cm, 3.3*cm, f"Timestamp: {datetime.now().isoformat()}")
-        
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.5)
-        c.line(width - 8*cm, 3*cm, width - 2*cm, 3*cm)
-        c.setFont("Helvetica-Oblique", 7)
-        c.drawCentredString(width - 5*cm, 2.6*cm, "Responsável Técnico - ZOI Sentinel")
+        c.drawString(2*cm, 3.6*cm, f"Timestamp: {datetime.now().isoformat()}")
+        c.drawString(2*cm, 3.3*cm, f"ID de Autenticidade: ZOI-{product.key.upper()}-2026")
 
-        # --- FINALIZAÇÃO ---
         c.showPage()
         c.save()
         pdf_bytes = buffer.getvalue()
@@ -630,18 +589,14 @@ def export_risk_pdf(product_key: str):
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f"attachment; filename=ZOI_PREMIUM_REPORT_{product_key}.pdf",
-                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-                "Pragma": "no-cache",
-                "Expires": "0"
+                "Content-Disposition": f"attachment; filename=ZOI_PREMIUM_{product_key}.pdf",
+                "Cache-Control": "no-cache"
             }
         )
     except Exception as e:
-        print(f"Erro ao gerar PDF Premium: {e}")
-        return Response(content="Erro interno ao gerar PDF", status_code=500)
+        return Response(content=f"Erro no PDF: {str(e)}", status_code=500)
     finally:
         db.close()
-
 # ==================================================================================
 # CONFIGURAÇÕES DE SEGURANÇA E AUTENTICAÇÃO
 # ==================================================================================
@@ -1007,7 +962,6 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
             "red": red_count
         }
     }
-
     
 if __name__ == "__main__":
     import uvicorn
