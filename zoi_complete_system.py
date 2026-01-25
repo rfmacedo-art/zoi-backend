@@ -1435,6 +1435,58 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
         }
     }
 
+from fastapi.responses import FileResponse
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+
+@app.get("/api/products/{product_key}/export-pdf")
+def export_product_pdf(product_key: str, db: SessionLocal = Depends(get_db)):
+    product = db.query(Product).filter(Product.key == product_key).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto não encontrado")
+    
+    # Busca o último cálculo de risco
+    risk = db.query(RiskAssessment).filter(RiskAssessment.product_id == product.id).order_by(RiskAssessment.calculation_timestamp.desc()).first()
+    
+    file_path = f"report_{product_key}.pdf"
+    c = canvas.Canvas(file_path, pagesize=A4)
+    width, height = A4
+
+    # Cabeçalho
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, height - 50, "ZOI Trade Advisory - Relatório de Compliance")
+    c.setFont("Helvetica", 10)
+    c.drawString(50, height - 70, f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    
+    # Dados do Produto
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, height - 110, f"Produto: {product.name_pt}")
+    c.setFont("Helvetica", 11)
+    c.drawString(50, height - 130, f"NCM: {product.ncm_code} | Direção: {product.direction.value.upper()}")
+    
+    # Quadro de Risco
+    c.setFillColor(colors.lightgrey)
+    c.rect(50, height - 200, 500, 50, fill=1)
+    c.setFillColor(colors.black)
+    score = risk.final_score if risk else "N/A"
+    status_v = risk.status.value if risk else "PENDENTE"
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(70, height - 180, f"SCORE DE RISCO: {score} / 100")
+    c.drawString(350, height - 180, f"STATUS: {status_v.upper()}")
+
+    # Recomendações
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, height - 230, "Recomendações Técnicas:")
+    c.setFont("Helvetica", 10)
+    y = height - 250
+    recs = risk.recommendations if risk and risk.recommendations else ["Realizar auditoria inicial"]
+    for rec in recs:
+        c.drawString(60, y, f"- {rec}")
+        y -= 15
+
+    c.save()
+    return FileResponse(file_path, filename=f"ZOI_Report_{product_key}.pdf")
 
 if __name__ == "__main__":
     import uvicorn
