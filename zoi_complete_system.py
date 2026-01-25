@@ -1,4 +1,3 @@
-
 """
 ZOI Trade Advisory - Complete Production System
 Version 2.0 - Commercial Phase with Enhanced Risk Analysis
@@ -492,111 +491,244 @@ app.add_middleware(
 @app.get("/api/products/{product_key}/export-pdf")
 def export_risk_pdf(product_key: str):
     """
-    Exportação PDF Premium v3.0 - ZOI Trade Advisory
-    Versão integrada ao sistema completo.
+    Endpoint de exportação PDF - VERSÃO CORRIGIDA COM PRECEDÊNCIA TOTAL
     """
     from io import BytesIO
-    from datetime import datetime
+    from fastapi.responses import Response
     from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
+    from reportlab.pdfgen import canvas as pdf_canvas
     from reportlab.lib.units import cm
-    from reportlab.lib import colors
-    from reportlab.graphics.shapes import Drawing
-    from reportlab.graphics.charts.spiderplots import SpiderPlot
-    from reportlab.graphics import renderPDF
-
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    
+    print(f"📄 [PDF ENDPOINT ATIVADO] Gerando PDF para: {product_key}")
+    
+    # Criar sessão dedicada para este endpoint
     db = SessionLocal()
+    
     try:
-        # Busca o produto no banco de dados existente
+        # Buscar produto
         product = db.query(Product).filter(Product.key == product_key).first()
         if not product:
-            return Response(content="Produto nao encontrado", status_code=404)
-
-        # Notas simuladas para o gráfico de radar (Baseadas no seu Risk Report anterior)
-        scores = {
-            "Sanitário": 48.0, 
-            "Fitossanitário": 82.0, 
-            "Logístico": 92.0, 
-            "Documental": 82.0
-        }
-
-        buffer = BytesIO()
-        c = canvas.Canvas(buffer, pagesize=A4)
-        width, height = A4
-
-        # --- ESTÉTICA: HEADER ---
-        c.setFillColorRGB(0.12, 0.25, 0.68) # Azul ZOI
-        c.rect(0, height - 3.5*cm, width, 3.5*cm, fill=True, stroke=False)
-        c.setFillColor(colors.white)
-        c.setFont("Helvetica-Bold", 20)
-        c.drawString(1.5*cm, height - 2*cm, "ZOI TRADE ADVISORY")
-        c.setFont("Helvetica", 10)
-        c.drawString(1.5*cm, height - 2.6*cm, "Dossiê de Compliance e Análise Multidimensional de Risco")
-
-        # --- INFO PRODUTO ---
-        c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(1.5*cm, height - 5*cm, f"PRODUTO: {product.name_pt.upper()}")
-        c.setFont("Helvetica", 10)
-        c.drawString(1.5*cm, height - 5.6*cm, f"NCM: {product.ncm_code} | Origem: BR | Destino: IT")
-
-        # --- GRÁFICO DE RADAR ---
-        # Criamos o container do gráfico
-        d = Drawing(400, 200)
-        sp = SpiderPlot()
-        sp.x, sp.y = 90, 10
-        sp.width, sp.height = 160, 160
-        sp.maxValue = 100
-        sp.data = [list(scores.values())]
-        sp.labels = list(scores.keys())
-        sp.strands[0].strokeColor = colors.HexColor("#1F3FAD")
-        sp.strands[0].fillColor = colors.HexColor("#1F3FAD66")
-        d.add(sp)
-        renderPDF.draw(d, c, 1.5*cm, height - 13*cm)
-
-        # --- GLOSSÁRIO TÉCNICO ---
-        c.setFont("Helvetica-Bold", 10)
-        c.setFillColorRGB(0.12, 0.25, 0.68)
-        c.drawString(1.5*cm, 7*cm, "GLOSSARIO TECNICO (IT/PT)")
+            db.close()
+            return Response(
+                content=b"Produto nao encontrado",
+                status_code=404,
+                media_type="text/plain"
+            )
         
-        c.setFillColor(colors.black)
-        c.setFont("Helvetica", 8)
-        glossario = [
-            "RASFF: Sistema di allerta rapida UE / Sistema de alerta rápido para riscos alimentares.",
-            "LMR: Limite Massimo Residui / Limite Máximo de Resíduos químicos permitidos.",
-            "FITOSSANITÁRIO: Conformità alle norme di protezione delle piante / Proteção contra pragas."
+        print(f"✅ Produto encontrado: {product.name_pt}")
+        
+        # Buscar última avaliação de risco
+        latest_assessment = db.query(RiskAssessment)\
+            .filter(RiskAssessment.product_id == product.id)\
+            .order_by(RiskAssessment.calculation_timestamp.desc())\
+            .first()
+        
+        # Se não houver avaliação, calcular uma nova
+        if not latest_assessment:
+            print("🔄 Calculando nova avaliação de risco...")
+            calc = EnhancedRiskCalculator()
+            result = calc.calculate(product, 0, 0)
+            
+            assessment_data = {
+                "score": result['score'],
+                "status": result['status'],
+                "status_label": result['status_label'],
+                "components": result['components'],
+                "recommendations": result['recommendations'],
+                "alerts": result['alerts']
+            }
+        else:
+            print(f"📊 Usando avaliação existente (Score: {latest_assessment.final_score})")
+            assessment_data = {
+                "score": latest_assessment.final_score,
+                "status": latest_assessment.status.value,
+                "status_label": "Baixo Risco" if latest_assessment.status.value == "green" else 
+                               "Risco Moderado" if latest_assessment.status.value == "yellow" else "Alto Risco",
+                "components": {
+                    "Sanitario": latest_assessment.rasff_score or 85.0,
+                    "Fitossanitario": latest_assessment.lmr_score or 80.0,
+                    "Logistico": latest_assessment.logistic_score or 88.0,
+                    "Documental": 82.0
+                },
+                "recommendations": latest_assessment.recommendations or ["Manter protocolos atuais de compliance."],
+                "alerts": {
+                    "rasff_6m": latest_assessment.rasff_alerts_6m,
+                    "rasff_12m": latest_assessment.rasff_alerts_12m,
+                    "historical_rejections": 0
+                }
+            }
+        
+        # Criar buffer para o PDF
+        buffer = BytesIO()
+        c = pdf_canvas.Canvas(buffer, pagesize=A4)
+        width, height = A4
+        
+        # Configurar título do documento
+        c.setTitle(f"ZOI Risk Report - {product_key}")
+        
+        # ===== HEADER =====
+        c.setFillColorRGB(0.12, 0.25, 0.69)  # Azul escuro
+        c.rect(0, height - 3*cm, width, 3*cm, fill=True, stroke=False)
+        
+        c.setFillColorRGB(1, 1, 1)  # Branco
+        c.setFont("Helvetica-Bold", 24)
+        c.drawString(2*cm, height - 2*cm, "ZOI Trade Advisory")
+        
+        c.setFont("Helvetica", 12)
+        c.drawString(2*cm, height - 2.5*cm, "Relatorio Executivo de Analise de Risco Sanitario e Fitossanitario")
+        
+        # ===== INFORMAÇÕES DO PRODUTO =====
+        y_position = height - 5*cm
+        
+        c.setFillColorRGB(0.12, 0.25, 0.69)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(2*cm, y_position, "Informacoes do Produto")
+        
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica", 11)
+        y_position -= 0.8*cm
+        
+        c.drawString(2*cm, y_position, f"Produto: {product.name_pt}")
+        y_position -= 0.6*cm
+        c.drawString(2*cm, y_position, f"Codigo NCM: {product.ncm_code}")
+        y_position -= 0.6*cm
+        
+        direction_text = 'Exportacao BR -> IT' if product.direction.value == 'export' else 'Importacao IT -> BR'
+        c.drawString(2*cm, y_position, f"Direcao Comercial: {direction_text}")
+        y_position -= 0.6*cm
+        c.drawString(2*cm, y_position, f"Estado: {product.state.value.capitalize()}")
+        
+        # ===== SCORE DE RISCO =====
+        y_position -= 1.5*cm
+        
+        c.setFillColorRGB(0.12, 0.25, 0.69)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(2*cm, y_position, "Score de Risco Global")
+        
+        y_position -= 0.8*cm
+        
+        # Definir cor do badge baseado no status
+        if assessment_data['status'] == 'green':
+            c.setFillColorRGB(0.09, 0.39, 0.20)  # Verde escuro
+        elif assessment_data['status'] == 'yellow':
+            c.setFillColorRGB(0.52, 0.30, 0.05)  # Amarelo escuro
+        else:
+            c.setFillColorRGB(0.60, 0.11, 0.11)  # Vermelho escuro
+        
+        c.setFont("Helvetica-Bold", 20)
+        c.drawString(2*cm, y_position, f"{assessment_data['score']:.1f}/100 - {assessment_data['status_label']}")
+        
+        c.setFillColorRGB(0.39, 0.45, 0.55)
+        c.setFont("Helvetica", 9)
+        y_position -= 0.5*cm
+        c.drawString(2*cm, y_position, f"Data da analise: {datetime.now().strftime('%d/%m/%Y as %H:%M')}")
+        
+        # ===== COMPONENTES DE RISCO =====
+        y_position -= 1.5*cm
+        
+        c.setFillColorRGB(0.12, 0.25, 0.69)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(2*cm, y_position, "Componentes de Risco")
+        
+        y_position -= 1*cm
+        
+        # Desenhar barras de progresso para cada componente
+        components = [
+            ("Sanitario", assessment_data['components'].get('Sanitario', assessment_data['components'].get('Sanitário', 85.0))),
+            ("Fitossanitario", assessment_data['components'].get('Fitossanitario', assessment_data['components'].get('Fitossanitário', 80.0))),
+            ("Logistico", assessment_data['components'].get('Logistico', assessment_data['components'].get('Logístico', 88.0))),
+            ("Documental", assessment_data['components'].get('Documental', 82.0))
         ]
-        y_text = 6.5*cm
-        for item in glossario:
-            c.drawString(1.5*cm, y_text, item)
-            y_text -= 0.4*cm
-
-        # --- ASSINATURA DIGITAL ---
-        c.setStrokeColorRGB(0.8, 0.8, 0.8)
-        c.rect(1.5*cm, 2*cm, width - 3*cm, 2.5*cm, stroke=True, fill=False)
-        c.setFont("Helvetica-Bold", 8)
-        c.drawString(2*cm, 4*cm, "VALIDADO DIGITALMENTE POR ZOI COMPLIANCE SYSTEM")
-        c.setFont("Helvetica", 7)
-        c.drawString(2*cm, 3.6*cm, f"Timestamp: {datetime.now().isoformat()}")
-        c.drawString(2*cm, 3.3*cm, f"ID de Autenticidade: ZOI-{product.key.upper()}-2026")
-
+        
+        c.setFont("Helvetica", 10)
+        for comp_name, comp_value in components:
+            c.setFillColorRGB(0, 0, 0)
+            c.drawString(2*cm, y_position, f"{comp_name}: {comp_value:.1f}/100")
+            
+            # Desenhar barra de fundo
+            c.setFillColorRGB(0.89, 0.91, 0.94)
+            c.rect(8*cm, y_position - 0.2*cm, 10*cm, 0.4*cm, fill=True, stroke=False)
+            
+            # Desenhar barra de progresso
+            c.setFillColorRGB(0.23, 0.51, 0.98)
+            bar_width = (comp_value / 100) * 10*cm
+            c.rect(8*cm, y_position - 0.2*cm, bar_width, 0.4*cm, fill=True, stroke=False)
+            
+            y_position -= 0.8*cm
+        
+        # ===== RECOMENDAÇÕES =====
+        y_position -= 1*cm
+        
+        c.setFillColorRGB(0.12, 0.25, 0.69)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(2*cm, y_position, "Recomendacoes Estrategicas")
+        
+        y_position -= 0.8*cm
+        
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica", 9)
+        
+        for idx, rec in enumerate(assessment_data['recommendations'][:5], 1):
+            # Quebrar texto longo
+            if len(rec) > 90:
+                rec = rec[:87] + "..."
+            
+            c.drawString(2.5*cm, y_position, f"{idx}. {rec}")
+            y_position -= 0.6*cm
+            
+            if y_position < 3*cm:
+                break
+        
+        # ===== FOOTER =====
+        c.setFillColorRGB(0.39, 0.45, 0.55)
+        c.setFont("Helvetica", 8)
+        c.drawString(2*cm, 2*cm, "ZOI Trade Advisory - Sistema Bilateral de Compliance Sanitaria e Fitossanitaria")
+        c.drawString(2*cm, 1.5*cm, f"Relatorio gerado em {datetime.now().strftime('%d/%m/%Y as %H:%M:%S')}")
+        
+        # Finalizar PDF
         c.showPage()
         c.save()
+        
+        # Obter bytes do PDF
         pdf_bytes = buffer.getvalue()
         buffer.close()
-
+        
+        print(f"✅ PDF gerado com sucesso ({len(pdf_bytes)} bytes)")
+        
+        # Fechar sessão do banco
+        db.close()
+        
+        # Retornar PDF com headers de force-download e no-cache
+        filename = f"ZOI_Risk_Report_{product_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f"attachment; filename=ZOI_PREMIUM_{product_key}.pdf",
-                "Cache-Control": "no-cache"
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Type": "application/pdf",
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0"
             }
         )
+        
     except Exception as e:
-        return Response(content=f"Erro no PDF: {str(e)}", status_code=500)
-    finally:
+        print(f"❌ ERRO ao gerar PDF: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
         db.close()
+        
+        return Response(
+            content=f"Erro ao gerar PDF: {str(e)}".encode(),
+            status_code=500,
+            media_type="text/plain"
+        )
+
+
 # ==================================================================================
 # CONFIGURAÇÕES DE SEGURANÇA E AUTENTICAÇÃO
 # ==================================================================================
@@ -962,6 +1094,7 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
             "red": red_count
         }
     }
+
     
 if __name__ == "__main__":
     import uvicorn
