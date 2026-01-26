@@ -1278,22 +1278,160 @@ def get_product(product_key: str, refresh: bool = False, db: SessionLocal = Depe
 @app.get("/api/products/{product_key}/export-pdf")
 def export_risk_pdf(product_key: str, db: SessionLocal = Depends(get_db)):
     """
-    📄 GERA PDF COM DADOS IDÊNTICOS AO APLICATIVO
+    📄 GERA PDF COM DADOS EM TEMPO REAL DA DYAD AI
+    
+    IMPORTANTE: Esta função SEMPRE força uma nova busca na Dyad AI
+    para garantir que o PDF contenha os dados mais recentes possíveis.
     """
     logger.info(f"\n{'='*80}")
-    logger.info(f"📄 GERAÇÃO DE PDF - Produto: {product_key}")
+    logger.info(f"📄 GERAÇÃO DE PDF COM DYAD AI - Produto: {product_key}")
     logger.info(f"{'='*80}\n")
     
-    analysis = get_product_analysis(product_key, db, force_refresh=False)
+    # 1. Buscar produto no banco
+    product = db.query(Product).filter(Product.key == product_key).first()
+    if not product:
+        logger.error(f"❌ Produto {product_key} não encontrado")
+        raise HTTPException(status_code=404, detail="Product not found")
     
-    product_data = analysis['product']
-    risk_data = analysis['risk_analysis']
-    dyad_raw = analysis.get('dyad_raw_data')
+    logger.info(f"✅ Produto encontrado: {product.name_pt} (NCM: {product.ncm_code})")
     
-    logger.info(f"📊 Gerando PDF com dados de: {risk_data['data_source']}")
+    # 2. VALIDAR NCM
+    if not product.ncm_code or product.ncm_code.strip() == "":
+        logger.error(f"❌ ERRO CRÍTICO: NCM ausente para '{product.name_pt}'")
+        raise HTTPException(status_code=400, detail="Produto sem código NCM válido")
+    
+    # 3. 🧠 FORÇAR BUSCA NA DYAD AI (SEMPRE)
+    logger.info(f"🧠 FORÇANDO busca na Dyad AI para PDF em tempo real...")
+    
+    dyad = DyadComplianceNavigator()
+    dyad_data = dyad.get_compliance_intelligence(
+        ncm_code=product.ncm_code,
+        product_name=product.name_pt,
+        target_market="EU"
+    )
+    
+    # 4. Preparar dados para o PDF
+    product_data = {
+        "id": product.id,
+        "key": product.key,
+        "name_pt": product.name_pt,
+        "name_it": product.name_it,
+        "name_en": product.name_en,
+        "ncm_code": product.ncm_code,
+        "hs_code": product.hs_code,
+        "direction": product.direction.value,
+        "state": product.state.value,
+        "category": product.category,
+        "requires_phytosanitary_cert": product.requires_phytosanitary_cert,
+        "requires_health_cert": product.requires_health_cert,
+        "requires_origin_cert": product.requires_origin_cert
+    }
+    
+    # 5. Se Dyad retornou dados, USAR APENAS ELES
+    if dyad_data:
+        logger.info(f"✅ Dyad AI retornou dados! Usando APENAS dados da IA para o PDF")
+        
+        # Calcular risk usando dados da Dyad
+        calc = EnhancedRiskCalculator()
+        risk_result = calc.calculate_from_dyad(dyad_data)
+        
+        # Salvar no banco (opcional, mas recomendado para histórico)
+        try:
+            rasff = dyad_data.get('rasff_alerts', {})
+            assessment = RiskAssessment(
+                product_id=product.id,
+                final_score=risk_result['score'],
+                status=RiskStatusDB(risk_result['status']),
+                rasff_score=risk_result['components']['Sanitário'],
+                lmr_score=risk_result['components']['Fitossanitário'],
+                phyto_score=risk_result['components']['Fitossanitário'],
+                logistic_score=risk_result['components']['Logístico'],
+                penalty=100 - risk_result['score'],
+                rasff_alerts_6m=rasff.get('last_6_months', 0),
+                rasff_alerts_12m=rasff.get('last_12_months', 0),
+                recommendations=risk_result['recommendations']
+            )
+            if hasattr(assessment, 'data_source'):
+                assessment.data_source = 'dyad_ai_pdf'
+            if hasattr(assessment, 'dyad_metadata'):
+                assessment.dyad_metadata = dyad_data.get('_metadata', {})
+            
+            db.add(assessment)
+            db.commit()
+            logger.info(f"💾 Assessment da Dyad salvo no banco para histórico")
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao salvar assessment (PDF continuará): {e}")
+            db.rollback()
+        
+        risk_data = risk_result
+        risk_data['data_source'] = 'dyad_ai'
+        
+        logger.info(f"📊 Dados do PDF:")
+        logger.info(f"   - Score: {risk_data['score']:.1f}")
+        logger.info(f"   - Status: {risk_data['status']} ({risk_data['status_label']})")
+        logger.info(f"   - Risk Factors: {len(risk_data.get('risk_factors', []))}")
+        logger.info(f"   - Compliance Alerts: {len(risk_data.get('compliance_alerts', []))}")
+        logger.info(f"   - Technical Specs: {len(risk_data.get('technical_specs', []))}")
+    
+    else:
+        # Fallback: se Dyad falhar, usar dados do banco MAS AVISAR
+        logger.warning(f"⚠️ Dyad AI não retornou dados. Usando fallback do banco.")
+        
+        latest_assessment = db.query(RiskAssessment).filter(
+            RiskAssessment.product_id == product.id
+        ).order_by(RiskAssessment.calculation_timestamp.desc()).first()
+        
+        if latest_assessment:
+            risk_factors = []
+            compliance_alerts = []
+            technical_specs = []
+            
+            if hasattr(product, 'risk_factors') and product.risk_factors:
+                risk_factors = product.risk_factors
+            if hasattr(product, 'compliance_alerts') and product.compliance_alerts:
+                compliance_alerts = product.compliance_alerts
+            if hasattr(product, 'technical_specs') and product.technical_specs:
+                technical_specs = product.technical_specs
+            
+            risk_data = {
+                "score": float(latest_assessment.final_score),
+                "status": latest_assessment.status.value,
+                "status_label": {
+                    'green': 'Baixo Risco',
+                    'yellow': 'Risco Moderado',
+                    'red': 'Alto Risco'
+                }.get(latest_assessment.status.value, 'Risco Moderado'),
+                "components": {
+                    "Sanitário": float(latest_assessment.rasff_score or 0),
+                    "Fitossanitário": float(latest_assessment.lmr_score or 0),
+                    "Logístico": float(latest_assessment.logistic_score or 0),
+                    "Documental": float(latest_assessment.penalty or 0)
+                },
+                "recommendations": latest_assessment.recommendations or [],
+                "alerts": {
+                    "rasff_6m": latest_assessment.rasff_alerts_6m,
+                    "rasff_12m": latest_assessment.rasff_alerts_12m
+                },
+                "risk_factors": risk_factors,
+                "compliance_alerts": compliance_alerts,
+                "technical_specs": technical_specs,
+                "data_source": "database_fallback"
+            }
+        else:
+            # Fallback final: calcular manualmente
+            logger.warning(f"⚠️ Nenhum assessment no banco. Calculando manualmente.")
+            calc_trad = TraditionalRiskCalculator()
+            risk_data = calc_trad.calculate(product, 0, 0)
+            risk_data['risk_factors'] = []
+            risk_data['compliance_alerts'] = []
+            risk_data['technical_specs'] = []
+            risk_data['data_source'] = "calculated_fallback"
+    
+    # 6. Gerar PDF
+    logger.info(f"📄 Gerando PDF com dados de: {risk_data['data_source']}")
     
     generator = ZOISentinelReportGenerator()
-    pdf_buffer = generator.generate_risk_pdf(product_data, risk_data, dyad_raw)
+    pdf_buffer = generator.generate_risk_pdf(product_data, risk_data, dyad_data)
     
     logger.info(f"✅ PDF gerado com sucesso!")
     logger.info(f"{'='*80}\n")
