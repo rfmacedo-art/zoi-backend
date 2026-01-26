@@ -1,3 +1,34 @@
+"""
+ZOI Trade Advisory - Complete Production System with Dyad Integration
+Version 2.1 - Intelligent Navigation with AI Agents
+"""
+
+import re
+import os
+import json
+import time
+import enum
+import smtplib
+import requests
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Union
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from io import BytesIO
+
+from bs4 import BeautifulSoup
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey, Enum as SQLEnum
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import StreamingResponse, Response
+from pydantic import BaseModel, EmailStr
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
 def _run_dyad_agent(self, ncm_code: str, product_name: str) -> Optional[Dict]:
         """
         Executa agente Dyad via REST API para navegar nos portais de compliance.
@@ -134,7 +165,9 @@ class DyadComplianceNavigator:
         if self.dyad_api_key:
             print(f"✅ Dyad API configurada: {self.dyad_base_url}")
         else:
-            print("⚠️ DYAD_API_KEY não configurada - usando modo fallback")# ==================================================================================
+            print("⚠️ DYAD_API_KEY não configurada - usando modo fallback")
+                
+# ==================================================================================
 # DYAD INTEGRATION - Intelligent Web Navigation via REST API
 # ==================================================================================
 
@@ -144,37 +177,6 @@ DYAD_AVAILABLE = True
 print("✅ Dyad REST API configurado (usando requests)")
 
 Base = declarative_base()
-"""
-ZOI Trade Advisory - Complete Production System with Dyad Integration
-Version 2.1 - Intelligent Navigation with AI Agents
-"""
-
-import re
-import os
-import json
-import time
-import enum
-import smtplib
-import requests
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from io import BytesIO
-
-from bs4 import BeautifulSoup
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey, Enum as SQLEnum
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import StreamingResponse, Response
-from pydantic import BaseModel, EmailStr
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-
 # ==================================================================================
 # DYAD INTEGRATION - Intelligent Web Navigation
 # ==================================================================================
