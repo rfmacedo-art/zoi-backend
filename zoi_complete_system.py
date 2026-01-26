@@ -1,6 +1,7 @@
 """
-ZOI Trade Advisory - Complete Production System with Dyad AI Integration
-Version 2.1 - Commercial Phase with Real-Time AI Compliance Analysis
+ZOI Sentinel - Trade Advisory System with AI Data Sovereignty
+Version 3.0 - Dyad AI as Primary Data Source
+Data Sovereignty: Dyad AI is the single source of truth for all compliance data
 """
 
 import re
@@ -8,6 +9,7 @@ import os
 import json
 import time
 import enum
+import logging
 import smtplib
 import requests
 from pathlib import Path
@@ -18,7 +20,7 @@ from email.mime.multipart import MIMEMultipart
 from io import BytesIO
 
 from bs4 import BeautifulSoup
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey, Enum as SQLEnum
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey, Text, Enum as SQLEnum
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
@@ -30,13 +32,26 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 # ==================================================================================
-# DYAD AI COMPLIANCE NAVIGATOR - CÉREBRO DO SISTEMA ZOI
+# CONFIGURAÇÃO DE LOGGING
+# ==================================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("ZOI_SENTINEL")
+
+# ==================================================================================
+# DYAD AI COMPLIANCE NAVIGATOR - SOBERANIA DE DADOS
 # ==================================================================================
 
 class DyadComplianceNavigator:
     """
-    Classe que integra a API da Dyad para navegação inteligente e análise de compliance.
-    Esta é a ponte entre o Backend (músculos) e a IA (cérebro) do sistema.
+    🧠 CÉREBRO DO SISTEMA ZOI SENTINEL - DATA SOVEREIGNTY
+    
+    Esta classe é a ÚNICA fonte de verdade para dados de compliance.
+    Todos os dados retornados pela Dyad sobrescrevem dados antigos no banco.
     """
     
     def __init__(self):
@@ -44,81 +59,123 @@ class DyadComplianceNavigator:
         self.api_url = os.environ.get('DYAD_API_URL', 'https://api.dyad.sh/v1/agents/run')
         
         if not self.api_key:
-            print("⚠️ AVISO: DYAD_API_KEY não configurada! Sistema funcionará com dados estáticos.")
+            logger.warning("⚠️ AVISO: DYAD_API_KEY não configurada! Data Sovereignty comprometida.")
         else:
-            print(f"✅ Dyad API inicializada: {self.api_url}")
+            logger.info(f"✅ Dyad API inicializada: {self.api_url}")
     
-    def search_compliance_data(self, ncm_code: str, product_name: str, target_market: str = "EU") -> Optional[Dict[str, Any]]:
+    def get_compliance_intelligence(self, ncm_code: str, product_name: str, target_market: str = "EU") -> Optional[Dict[str, Any]]:
         """
-        Dispara uma busca via IA na Dyad para encontrar dados de compliance atualizados.
+        🎯 MÉTODO PRINCIPAL DE SOBERANIA DE DADOS
+        
+        Busca inteligência de compliance via IA da Dyad.
+        Este é o método que define a verdade dos dados no sistema.
         
         Args:
-            ncm_code: Código NCM do produto (ex: "08055000")
-            product_name: Nome do produto em português (ex: "Limão Tahiti")
+            ncm_code: Código NCM do produto (OBRIGATÓRIO)
+            product_name: Nome do produto em português
             target_market: Mercado de destino (default: "EU")
         
         Returns:
-            Dict com dados de compliance ou None em caso de erro
+            Dict completo com estrutura padronizada ou None em caso de erro
         """
         
         if not self.api_key:
-            print("⚠️ Dyad API não configurada, pulando busca inteligente")
+            logger.error("❌ CRÍTICO: Dyad API não configurada. Data Sovereignty impossível.")
+            return None
+        
+        if not ncm_code or ncm_code.strip() == "":
+            logger.error(f"❌ ERRO CRÍTICO: NCM vazio para produto '{product_name}'. Validação falhou.")
             return None
         
         try:
-            print(f"\n{'='*80}")
-            print(f"🧠 DYAD AI - Iniciando busca inteligente para: {product_name} (NCM: {ncm_code})")
-            print(f"{'='*80}")
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🧠 DYAD AI - SOBERANIA DE DADOS INICIADA")
+            logger.info(f"Produto: {product_name}")
+            logger.info(f"NCM: {ncm_code}")
+            logger.info(f"Mercado: {target_market}")
+            logger.info(f"{'='*80}")
             
-            # Construção do prompt otimizado para análise de compliance
+            # Prompt otimizado para estrutura de dados consistente
             prompt = f"""
-Você é um especialista em comércio internacional e compliance regulatório.
+Você é o sistema de inteligência de compliance comercial ZOI Sentinel.
 
 PRODUTO: {product_name}
 NCM: {ncm_code}
 MERCADO DESTINO: {target_market}
 
-TAREFA:
-Busque e compile as informações mais recentes sobre requisitos de exportação deste produto do Brasil para a União Europeia.
+MISSÃO:
+Compile os dados mais recentes e precisos sobre requisitos de exportação deste produto do Brasil para a União Europeia.
 
-INFORMAÇÕES NECESSÁRIAS:
-1. **Limites Máximos de Resíduos (LMR)**: Principais substâncias controladas e seus limites em mg/kg
-2. **Alertas RASFF**: Número de alertas sanitários nos últimos 6 e 12 meses
-3. **Certificações Obrigatórias**: Quais certificados são necessários (fitossanitário, sanitário, origem)
-4. **Barreiras Não-Tarifárias**: Principais restrições e requisitos adicionais
-5. **Histórico de Rejeições**: Casos recentes de rejeição de produtos similares
+DADOS OBRIGATÓRIOS:
+1. **risk_score**: Calcule um score de risco de 0-100 (quanto maior, melhor)
+2. **risk_status**: Classifique como "green" (>80), "yellow" (60-80) ou "red" (<60)
+3. **risk_factors**: Lista de fatores de risco específicos
+4. **compliance_alerts**: Lista de alertas e exigências regulatórias
+5. **technical_specs**: Especificações técnicas e certificações necessárias
+6. **lmr_data**: Limites Máximos de Resíduos com substâncias e valores
+7. **rasff_alerts**: Contagem de alertas sanitários (6 meses e 12 meses)
+8. **certifications**: Certificações obrigatórias (booleanos)
+9. **barriers**: Barreiras não-tarifárias
+10. **recommendations**: Recomendações práticas
 
-FORMATO DE RESPOSTA:
-Retorne APENAS um JSON válido com a estrutura:
+FORMATO DE RESPOSTA (JSON ESTRITO):
 {{
+  "risk_score": 75.5,
+  "risk_status": "yellow",
+  "risk_factors": [
+    "Fator 1: Descrição detalhada do risco",
+    "Fator 2: Descrição detalhada do risco"
+  ],
+  "compliance_alerts": [
+    "Alerta 1: Requisito regulatório específico",
+    "Alerta 2: Requisito regulatório específico"
+  ],
+  "technical_specs": [
+    "Especificação 1: Detalhe técnico completo",
+    "Especificação 2: Detalhe técnico completo"
+  ],
   "lmr_data": [
-    {{"substance": "Nome da Substância", "eu_limit_mg_kg": 0.0, "source": "Regulamento EU"}}
+    {{"substance": "Nome da substância", "eu_limit_mg_kg": 0.5, "br_limit_mg_kg": 1.0, "source": "Regulamento EU 396/2005"}}
   ],
   "rasff_alerts": {{
-    "last_6_months": 0,
-    "last_12_months": 0,
-    "common_issues": ["lista", "de", "problemas"]
+    "last_6_months": 2,
+    "last_12_months": 5,
+    "common_issues": ["Problema comum 1", "Problema comum 2"]
   }},
   "certifications": {{
-    "phytosanitary": true/false,
-    "health": true/false,
-    "origin": true/false,
-    "additional": ["outros", "certificados"]
+    "phytosanitary": true,
+    "health": false,
+    "origin": true,
+    "additional": ["Certificado X", "Certificado Y"]
   }},
-  "barriers": ["lista", "de", "barreiras"],
-  "recent_rejections": 0,
-  "risk_factors": ["fatores", "de", "risco"],
-  "recommendations": ["recomendações", "práticas"]
+  "barriers": [
+    "Barreira 1: Descrição completa da restrição",
+    "Barreira 2: Descrição completa da restrição"
+  ],
+  "recommendations": [
+    "Recomendação 1: Ação concreta e específica",
+    "Recomendação 2: Ação concreta e específica"
+  ],
+  "data_quality": {{
+    "confidence_level": "high",
+    "sources": ["Fonte oficial 1", "Fonte oficial 2"],
+    "last_verified": "2026-01-26"
+  }}
 }}
 
-IMPORTANTE: Retorne APENAS o JSON, sem texto adicional antes ou depois.
+REGRAS CRÍTICAS:
+- Retorne APENAS JSON válido, sem texto antes ou depois
+- Todos os arrays devem conter strings descritivas e completas (não apenas palavras-chave)
+- risk_factors, compliance_alerts e technical_specs são OBRIGATÓRIOS e devem ser detalhados
+- Se não houver dados para um campo, use array vazio []
+- Valores numéricos devem ser precisos e baseados em dados reais
+- Cada item de lista deve ser uma frase completa e informativa
 """
             
-            # Payload para a API da Dyad
             payload = {
                 "instructions": prompt,
-                "max_steps": 10,
-                "timeout_seconds": 120
+                "max_steps": 15,
+                "timeout_seconds": 150
             }
             
             headers = {
@@ -126,63 +183,76 @@ IMPORTANTE: Retorne APENAS o JSON, sem texto adicional antes ou depois.
                 "Content-Type": "application/json"
             }
             
-            print(f"📡 Enviando requisição para Dyad API...")
+            logger.info(f"📡 Enviando requisição para Dyad API...")
             start_time = time.time()
             
             response = requests.post(
                 self.api_url,
                 json=payload,
                 headers=headers,
-                timeout=130
+                timeout=160
             )
             
             elapsed_time = time.time() - start_time
-            print(f"⏱️ Tempo de resposta: {elapsed_time:.2f}s")
+            logger.info(f"⏱️ Tempo de resposta: {elapsed_time:.2f}s")
             
             if response.status_code == 200:
                 result = response.json()
-                print(f"✅ Resposta recebida da Dyad API")
+                logger.info(f"✅ Resposta recebida da Dyad API (Status 200)")
                 
-                # Extrair o conteúdo da resposta
                 output_text = result.get('output', '')
                 
-                # Tentar extrair JSON da resposta
-                compliance_data = self._extract_json_from_response(output_text)
+                compliance_data = self._extract_and_validate_json(output_text)
                 
                 if compliance_data:
-                    print(f"✅ Dados de compliance parseados com sucesso")
-                    print(f"📊 Alertas RASFF encontrados: {compliance_data.get('rasff_alerts', {}).get('last_12_months', 0)}")
-                    print(f"🧪 Substâncias LMR encontradas: {len(compliance_data.get('lmr_data', []))}")
+                    logger.info(f"✅ SOBERANIA DE DADOS: Dados parseados e validados")
+                    logger.info(f"📊 Risk Score: {compliance_data.get('risk_score', 'N/A')}")
+                    logger.info(f"🚦 Risk Status: {compliance_data.get('risk_status', 'N/A')}")
+                    logger.info(f"⚠️ Risk Factors: {len(compliance_data.get('risk_factors', []))} identificados")
+                    logger.info(f"📋 Compliance Alerts: {len(compliance_data.get('compliance_alerts', []))} alertas")
+                    logger.info(f"🔬 Technical Specs: {len(compliance_data.get('technical_specs', []))} especificações")
+                    
+                    # Adicionar metadados de controle
+                    compliance_data['_metadata'] = {
+                        'retrieved_at': datetime.utcnow().isoformat(),
+                        'source': 'dyad_ai',
+                        'api_response_time_seconds': elapsed_time,
+                        'ncm_code': ncm_code,
+                        'product_name': product_name
+                    }
+                    
                     return compliance_data
                 else:
-                    print(f"⚠️ Não foi possível parsear JSON da resposta")
-                    print(f"📄 Resposta bruta: {output_text[:500]}...")
+                    logger.error(f"❌ FALHA NA SOBERANIA: Não foi possível parsear JSON da resposta")
+                    logger.debug(f"📄 Resposta bruta (primeiros 1000 chars): {output_text[:1000]}")
                     return None
                     
             else:
-                print(f"❌ Erro na API Dyad: Status {response.status_code}")
-                print(f"📄 Resposta: {response.text[:500]}")
+                logger.error(f"❌ Erro na API Dyad: Status {response.status_code}")
+                logger.error(f"📄 Resposta: {response.text[:500]}")
                 return None
                 
         except requests.exceptions.Timeout:
-            print(f"⏱️ Timeout na requisição para Dyad API (>130s)")
+            logger.error(f"⏱️ TIMEOUT: Dyad API não respondeu em 160s")
             return None
         except requests.exceptions.RequestException as e:
-            print(f"❌ Erro de conexão com Dyad API: {e}")
+            logger.error(f"❌ Erro de conexão com Dyad API: {e}")
             return None
         except Exception as e:
-            print(f"❌ Erro inesperado na busca Dyad: {e}")
+            logger.error(f"❌ Erro inesperado na busca Dyad: {e}")
             import traceback
             traceback.print_exc()
             return None
     
-    def _extract_json_from_response(self, text: str) -> Optional[Dict[str, Any]]:
+    def _extract_and_validate_json(self, text: str) -> Optional[Dict[str, Any]]:
         """
-        Extrai e parseia JSON da resposta da Dyad, mesmo se vier com texto adicional.
+        Extrai, parseia e VALIDA JSON da resposta da Dyad.
+        Garante que a estrutura de dados esteja completa e consistente.
         """
         try:
             # Tentar parsear diretamente
-            return json.loads(text)
+            data = json.loads(text)
+            return self._validate_structure(data)
         except json.JSONDecodeError:
             # Tentar encontrar JSON dentro do texto
             import re
@@ -191,17 +261,57 @@ IMPORTANTE: Retorne APENAS o JSON, sem texto adicional antes ou depois.
             
             for match in matches:
                 try:
-                    parsed = json.loads(match)
-                    # Validar se tem a estrutura esperada
-                    if 'lmr_data' in parsed or 'rasff_alerts' in parsed:
-                        return parsed
+                    data = json.loads(match)
+                    validated = self._validate_structure(data)
+                    if validated:
+                        return validated
                 except json.JSONDecodeError:
                     continue
             
+            logger.error("❌ Nenhum JSON válido encontrado na resposta")
             return None
+    
+    def _validate_structure(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Valida e normaliza a estrutura de dados da Dyad.
+        Garante que todos os campos obrigatórios existam.
+        """
+        required_fields = ['risk_score', 'risk_status', 'risk_factors', 'compliance_alerts', 'technical_specs']
+        
+        # Verificar campos obrigatórios
+        for field in required_fields:
+            if field not in data:
+                logger.warning(f"⚠️ Campo obrigatório ausente: {field}")
+                return None
+        
+        # Normalizar listas (converter strings longas em listas)
+        list_fields = ['risk_factors', 'compliance_alerts', 'technical_specs', 'barriers', 'recommendations']
+        for field in list_fields:
+            if field in data:
+                if isinstance(data[field], str):
+                    # Converter string para lista
+                    data[field] = [item.strip() for item in data[field].split('\n') if item.strip()]
+                elif not isinstance(data[field], list):
+                    data[field] = []
+        
+        # Validar risk_status
+        if data['risk_status'] not in ['green', 'yellow', 'red']:
+            logger.warning(f"⚠️ risk_status inválido: {data['risk_status']}, ajustando para 'yellow'")
+            data['risk_status'] = 'yellow'
+        
+        # Garantir valores padrão
+        data.setdefault('lmr_data', [])
+        data.setdefault('rasff_alerts', {'last_6_months': 0, 'last_12_months': 0, 'common_issues': []})
+        data.setdefault('certifications', {'phytosanitary': True, 'health': False, 'origin': True, 'additional': []})
+        data.setdefault('barriers', [])
+        data.setdefault('recommendations', [])
+        
+        logger.info("✅ Estrutura de dados validada e normalizada")
+        return data
+
 
 # ==================================================================================
-# MODELOS E CONFIGURAÇÃO DO BANCO DE DADOS
+# MODELOS DO BANCO DE DADOS
 # ==================================================================================
 
 Base = declarative_base()
@@ -250,6 +360,13 @@ class Product(Base):
     requires_health_cert = Column(Boolean, default=False)
     requires_origin_cert = Column(Boolean, default=True)
     
+    # ⭐ NOVOS CAMPOS PARA SOBERANIA DE DADOS DYAD
+    risk_factors = Column(JSON)  # Lista de fatores de risco da IA
+    compliance_alerts = Column(JSON)  # Alertas de compliance da IA
+    technical_specs = Column(JSON)  # Especificações técnicas da IA
+    dyad_last_sync = Column(DateTime)  # Última sincronização com Dyad
+    dyad_data_quality = Column(JSON)  # Metadados de qualidade dos dados
+    
     critical_substances = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -270,6 +387,7 @@ class LMRData(Base):
     detection_rate = Column(Float)
     
     source_authority = Column(String(50))
+    regulatory_source = Column(String(500))  # URL ou referência do regulamento
     last_updated = Column(DateTime, default=datetime.utcnow)
     
     product = relationship("Product", back_populates="lmr_data")
@@ -295,6 +413,10 @@ class RiskAssessment(Base):
     
     recommendations = Column(JSON)
     calculation_timestamp = Column(DateTime, default=datetime.utcnow)
+    
+    # ⭐ Campos para rastreabilidade da fonte de dados
+    data_source = Column(String(50))  # 'dyad_ai' ou 'manual'
+    dyad_metadata = Column(JSON)  # Metadados da busca Dyad
     
     product = relationship("Product", back_populates="risk_assessments")
 
@@ -329,199 +451,171 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-# Configuração do banco de dados com pool_pre_ping para estabilidade no Render
+# Configuração do banco de dados com pool otimizado
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://zoi_user:IN3LI5N6OshhlVIDetxmCXhX01es3nK8@dpg-d5pkoeer433s73ddm970-a/zoi_db")
 
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(
-    DATABASE_URL, 
-    pool_pre_ping=True,  # Previne conexões perdidas no Render
-    pool_recycle=3600,   # Recicla conexões a cada hora
-    pool_size=5,         # Tamanho do pool
-    max_overflow=10      # Máximo de conexões extras
+    DATABASE_URL,
+    pool_pre_ping=True,  # ✅ Previne conexões perdidas
+    pool_recycle=3600,
+    pool_size=5,
+    max_overflow=10
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 # ==================================================================================
-# PERFIS DE RISCO NCM - Dados Estáticos como Fallback
-# ==================================================================================
-
-NCM_RISK_PROFILES = {
-    "08055000": {
-        "name": "Limão/Lima",
-        "eu_barriers": "high",
-        "common_issues": ["LMR Carbendazim", "Mosca das frutas", "Certificação fitossanitária"],
-        "historical_rejections": 12,
-        "sanitario_base": 75.0,
-        "fitossanitario_base": 68.0,
-        "logistico_base": 85.0,
-        "documental_base": 72.0
-    },
-    "12019000": {
-        "name": "Soja em Grãos",
-        "eu_barriers": "medium",
-        "common_issues": ["Glifosato LMR", "OGM detection", "Deforestation compliance"],
-        "historical_rejections": 5,
-        "sanitario_base": 88.0,
-        "fitossanitario_base": 82.0,
-        "logistico_base": 92.0,
-        "documental_base": 85.0
-    },
-    "09011110": {
-        "name": "Café Cru",
-        "eu_barriers": "low",
-        "common_issues": ["Ochratoxin A", "Origem sustentável"],
-        "historical_rejections": 2,
-        "sanitario_base": 92.0,
-        "fitossanitario_base": 90.0,
-        "logistico_base": 88.0,
-        "documental_base": 95.0
-    },
-    "02023000": {
-        "name": "Carne Bovina",
-        "eu_barriers": "high",
-        "common_issues": ["Hormônios", "Rastreabilidade", "Bem-estar animal"],
-        "historical_rejections": 18,
-        "sanitario_base": 72.0,
-        "fitossanitario_base": 78.0,
-        "logistico_base": 65.0,
-        "documental_base": 68.0
-    },
-    "20091100": {
-        "name": "Suco de Laranja",
-        "eu_barriers": "medium",
-        "common_issues": ["Carbendazim LMR", "Acidez", "Contaminantes"],
-        "historical_rejections": 8,
-        "sanitario_base": 80.0,
-        "fitossanitario_base": 75.0,
-        "logistico_base": 88.0,
-        "documental_base": 82.0
-    },
-    "04090000": {
-        "name": "Mel Natural",
-        "eu_barriers": "medium",
-        "common_issues": ["Antibióticos", "Origem botânica", "Rotulagem"],
-        "historical_rejections": 6,
-        "sanitario_base": 85.0,
-        "fitossanitario_base": 88.0,
-        "logistico_base": 90.0,
-        "documental_base": 82.0
-    }
-}
-
-# ==================================================================================
-# CALCULADORA DE RISCO APRIMORADA
+# CALCULADORA DE RISCO COM DADOS DA DYAD
 # ==================================================================================
 
 class EnhancedRiskCalculator:
+    """
+    Calculadora que PRIORIZA dados da Dyad AI.
+    """
     
-    def calculate(self, product: Product, rasff_6m: int, rasff_12m: int) -> dict:
-        profile = NCM_RISK_PROFILES.get(product.ncm_code, {
-            "sanitario_base": 85.0,
-            "fitossanitario_base": 85.0,
-            "logistico_base": 85.0,
-            "documental_base": 85.0,
-            "historical_rejections": 0
-        })
+    def calculate_from_dyad(self, dyad_data: Dict[str, Any]) -> dict:
+        """
+        Calcula risco usando APENAS dados da Dyad (soberania total).
+        """
+        risk_score = dyad_data.get('risk_score', 75.0)
+        risk_status = dyad_data.get('risk_status', 'yellow')
         
-        sanitario = profile["sanitario_base"]
-        fitossanitario = profile["fitossanitario_base"]
-        logistico = profile["logistico_base"]
-        documental = profile["documental_base"]
+        status_labels = {
+            'green': 'Baixo Risco',
+            'yellow': 'Risco Moderado',
+            'red': 'Alto Risco'
+        }
         
-        # Penalidades por alertas RASFF
-        if rasff_6m > 0:
-            sanitario -= min(rasff_6m * 5, 20)
-        if rasff_12m > 5:
-            sanitario -= min((rasff_12m - 5) * 3, 15)
-        
-        # Cálculo do score final
-        final_score = (sanitario * 0.35 + fitossanitario * 0.30 + 
-                      logistico * 0.20 + documental * 0.15)
-        
-        # Determinação do status
-        if final_score >= 80:
-            status = "green"
-            status_label = "Baixo Risco"
-        elif final_score >= 60:
-            status = "yellow"
-            status_label = "Risco Moderado"
-        else:
-            status = "red"
-            status_label = "Alto Risco"
-        
-        recommendations = []
-        if sanitario < 75:
-            recommendations.append("Reforçar controles sanitários e rastreabilidade")
-        if fitossanitario < 75:
-            recommendations.append("Auditar uso de agrotóxicos e conformidade com LMRs")
-        if rasff_6m > 0:
-            recommendations.append(f"Atenção: {rasff_6m} alertas RASFF nos últimos 6 meses")
+        rasff_alerts = dyad_data.get('rasff_alerts', {})
         
         return {
-            "score": final_score,
-            "status": status,
-            "status_label": status_label,
+            "score": risk_score,
+            "status": risk_status,
+            "status_label": status_labels.get(risk_status, 'Risco Moderado'),
             "components": {
-                "Sanitário": sanitario,
-                "Fitossanitário": fitossanitario,
-                "Logístico": logistico,
-                "Documental": documental
+                "Sanitário": risk_score * 0.35,
+                "Fitossanitário": risk_score * 0.30,
+                "Logístico": risk_score * 0.20,
+                "Documental": risk_score * 0.15
             },
-            "recommendations": recommendations,
+            "recommendations": dyad_data.get('recommendations', []),
             "alerts": {
-                "rasff_6m": rasff_6m,
-                "rasff_12m": rasff_12m,
-                "historical_rejections": profile.get("historical_rejections", 0)
-            }
+                "rasff_6m": rasff_alerts.get('last_6_months', 0),
+                "rasff_12m": rasff_alerts.get('last_12_months', 0),
+                "historical_rejections": 0
+            },
+            "risk_factors": dyad_data.get('risk_factors', []),
+            "compliance_alerts": dyad_data.get('compliance_alerts', []),
+            "technical_specs": dyad_data.get('technical_specs', []),
+            "data_source": "dyad_ai"
         }
 
 
 # ==================================================================================
-# GERADOR DE PDF COM REPORTLAB
+# GERADOR DE PDF
 # ==================================================================================
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 
-class ZOIReportGenerator:
+class ZOISentinelReportGenerator:
+    """
+    Gerador de PDF que reflete EXATAMENTE os dados mostrados no aplicativo.
+    Garante sincronização total entre PDF e interface.
+    """
     
-    def generate_risk_pdf(self, product_data: dict, risk_data: dict) -> BytesIO:
+    def _format_list_field(self, data: Union[List[str], str, None]) -> List[str]:
+        """
+        Formata campos que podem ser lista ou string para lista consistente.
+        """
+        if not data:
+            return []
+        
+        if isinstance(data, list):
+            return [str(item) for item in data if item]
+        
+        if isinstance(data, str):
+            # Se for string longa, quebrar por linhas ou pontos
+            if '\n' in data:
+                return [line.strip() for line in data.split('\n') if line.strip()]
+            elif len(data) > 200:
+                sentences = re.split(r'[.!?]+', data)
+                return [s.strip() for s in sentences if s.strip()]
+            else:
+                return [data]
+        
+        return []
+    
+    def generate_risk_pdf(self, product_data: dict, risk_data: dict, dyad_data: Optional[dict] = None) -> BytesIO:
+        """
+        Gera PDF usando os mesmos dados exibidos no aplicativo.
+        """
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm)
         styles = getSampleStyleSheet()
         story = []
         
-        # Estilo customizado para título
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Heading1'],
             fontSize=18,
             textColor=colors.HexColor('#1a365d'),
             spaceAfter=12,
-            alignment=TA_CENTER
+            alignment=TA_CENTER,
+            fontName='Helvetica-Bold'
         )
         
-        # Título do relatório
-        story.append(Paragraph("ZOI Trade Advisory", title_style))
-        story.append(Paragraph("Relatório de Análise de Risco de Exportação", styles['Heading2']))
-        story.append(Spacer(1, 10*mm))
+        section_style = ParagraphStyle(
+            'SectionTitle',
+            parent=styles['Heading2'],
+            fontSize=14,
+            textColor=colors.HexColor('#2d3748'),
+            spaceAfter=8,
+            spaceBefore=12,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Cabeçalho
+        story.append(Paragraph("🛡️ ZOI SENTINEL", title_style))
+        story.append(Paragraph("Relatório de Inteligência de Compliance", styles['Heading3']))
+        
+        # Indicador de fonte de dados
+        data_source = risk_data.get('data_source', 'unknown')
+        if data_source == 'dyad_ai':
+            source_text = "📡 <b>Dados em Tempo Real - Dyad AI</b>"
+            source_color = colors.HexColor('#38a169')
+        else:
+            source_text = "📂 <b>Dados do Banco de Dados (Fallback)</b>"
+            source_color = colors.HexColor('#d69e2e')
+        
+        source_style = ParagraphStyle(
+            'SourceStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            textColor=source_color,
+            alignment=TA_CENTER,
+            fontName='Helvetica-Bold'
+        )
+        story.append(Paragraph(source_text, source_style))
+        story.append(Spacer(1, 8*mm))
         
         # Informações do produto
-        story.append(Paragraph("<b>Informações do Produto</b>", styles['Heading3']))
+        story.append(Paragraph("INFORMAÇÕES DO PRODUTO", section_style))
         
         product_info = [
             ['Campo', 'Valor'],
             ['Produto', product_data.get('name_pt', 'N/A')],
+            ['Nome Italiano', product_data.get('name_it', 'N/A')],
             ['Código NCM', product_data.get('ncm_code', 'N/A')],
+            ['Código HS', product_data.get('hs_code', 'N/A')],
             ['Direção', product_data.get('direction', 'N/A').upper()],
             ['Estado', product_data.get('state', 'N/A').capitalize()],
         ]
@@ -533,7 +627,10 @@ class ZOIReportGenerator:
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('TOPPADDING', (0, 1), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ]))
         
@@ -541,7 +638,7 @@ class ZOIReportGenerator:
         story.append(Spacer(1, 8*mm))
         
         # Score de risco
-        story.append(Paragraph("<b>Avaliação de Risco</b>", styles['Heading3']))
+        story.append(Paragraph("AVALIAÇÃO DE RISCO", section_style))
         
         score = risk_data.get('score', 0)
         status = risk_data.get('status', 'yellow')
@@ -567,103 +664,113 @@ class ZOIReportGenerator:
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTNAME', (0, 2), (1, 2), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ]))
         
         story.append(risk_table)
         story.append(Spacer(1, 8*mm))
         
-        # Componentes do risco
-        story.append(Paragraph("<b>Componentes da Avaliação</b>", styles['Heading3']))
+        # ⭐ Fatores de Risco (OBRIGATÓRIO - Soberania de Dados)
+        risk_factors = self._format_list_field(risk_data.get('risk_factors', []))
+        if risk_factors:
+            story.append(Paragraph("⚠️ FATORES DE RISCO", section_style))
+            
+            for i, factor in enumerate(risk_factors[:10], 1):
+                factor_para = Paragraph(f"<b>{i}.</b> {factor}", styles['Normal'])
+                story.append(factor_para)
+                story.append(Spacer(1, 2*mm))
+            
+            story.append(Spacer(1, 5*mm))
         
+        # ⭐ Alertas de Compliance (OBRIGATÓRIO - Soberania de Dados)
+        compliance_alerts = self._format_list_field(risk_data.get('compliance_alerts', []))
+        if compliance_alerts:
+            story.append(Paragraph("📋 ALERTAS DE COMPLIANCE", section_style))
+            
+            for i, alert in enumerate(compliance_alerts[:10], 1):
+                alert_para = Paragraph(f"<b>{i}.</b> {alert}", styles['Normal'])
+                story.append(alert_para)
+                story.append(Spacer(1, 2*mm))
+            
+            story.append(Spacer(1, 5*mm))
+        
+        # ⭐ Especificações Técnicas (OBRIGATÓRIO - Soberania de Dados)
+        technical_specs = self._format_list_field(risk_data.get('technical_specs', []))
+        if technical_specs:
+            story.append(Paragraph("🔬 ESPECIFICAÇÕES TÉCNICAS", section_style))
+            
+            for i, spec in enumerate(technical_specs[:10], 1):
+                spec_para = Paragraph(f"<b>{i}.</b> {spec}", styles['Normal'])
+                story.append(spec_para)
+                story.append(Spacer(1, 2*mm))
+            
+            story.append(Spacer(1, 5*mm))
+        
+        # Componentes
         components = risk_data.get('components', {})
-        component_data = [['Componente', 'Score']]
-        
-        for comp_name, comp_score in components.items():
-            component_data.append([comp_name, f"{comp_score:.1f}"])
-        
-        component_table = Table(component_data, colWidths=[90*mm, 90*mm])
-        component_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e2e8f0')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1a365d')),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ]))
-        
-        story.append(component_table)
-        story.append(Spacer(1, 8*mm))
-        
-        # Alertas RASFF
-        alerts = risk_data.get('alerts', {})
-        if alerts.get('rasff_6m', 0) > 0 or alerts.get('rasff_12m', 0) > 0:
-            story.append(Paragraph("<b>Alertas RASFF</b>", styles['Heading3']))
+        if components:
+            story.append(Paragraph("COMPONENTES DA AVALIAÇÃO", section_style))
             
-            alert_data = [
-                ['Período', 'Quantidade'],
-                ['Últimos 6 meses', str(alerts.get('rasff_6m', 0))],
-                ['Últimos 12 meses', str(alerts.get('rasff_12m', 0))],
-                ['Rejeições Históricas', str(alerts.get('historical_rejections', 0))]
-            ]
+            component_data = [['Componente', 'Score']]
+            for comp_name, comp_score in components.items():
+                component_data.append([comp_name, f"{comp_score:.1f}"])
             
-            alert_table = Table(alert_data, colWidths=[90*mm, 90*mm])
-            alert_table.setStyle(TableStyle([
+            component_table = Table(component_data, colWidths=[90*mm, 90*mm])
+            component_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e2e8f0')),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1a365d')),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
             ]))
             
-            story.append(alert_table)
+            story.append(component_table)
+            story.append(Spacer(1, 8*mm))
+        
+        # Dados LMR da Dyad
+        if dyad_data and 'lmr_data' in dyad_data and dyad_data['lmr_data']:
+            story.append(Paragraph("🧪 LIMITES MÁXIMOS DE RESÍDUOS (LMR)", section_style))
+            
+            lmr_table_data = [['Substância', 'Limite UE (mg/kg)', 'Limite BR (mg/kg)']]
+            for lmr in dyad_data['lmr_data'][:8]:
+                lmr_table_data.append([
+                    lmr.get('substance', 'N/A'),
+                    str(lmr.get('eu_limit_mg_kg', 'N/A')),
+                    str(lmr.get('br_limit_mg_kg', 'N/A'))
+                ])
+            
+            lmr_table = Table(lmr_table_data, colWidths=[80*mm, 50*mm, 50*mm])
+            lmr_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e2e8f0')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1a365d')),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ]))
+            
+            story.append(lmr_table)
             story.append(Spacer(1, 8*mm))
         
         # Recomendações
-        recommendations = risk_data.get('recommendations', [])
+        recommendations = self._format_list_field(risk_data.get('recommendations', []))
         if recommendations:
-            story.append(Paragraph("<b>Recomendações</b>", styles['Heading3']))
+            story.append(Paragraph("💡 RECOMENDAÇÕES", section_style))
             
-            for i, rec in enumerate(recommendations, 1):
-                story.append(Paragraph(f"{i}. {rec}", styles['Normal']))
-                story.append(Spacer(1, 3*mm))
-        
-        # Dados da Dyad (se disponíveis)
-        if 'dyad_data' in risk_data and risk_data['dyad_data']:
+            for i, rec in enumerate(recommendations[:8], 1):
+                rec_para = Paragraph(f"<b>{i}.</b> {rec}", styles['Normal'])
+                story.append(rec_para)
+                story.append(Spacer(1, 2*mm))
+            
             story.append(Spacer(1, 5*mm))
-            story.append(Paragraph("<b>🧠 Dados em Tempo Real (Dyad AI)</b>", styles['Heading3']))
-            
-            dyad_data = risk_data['dyad_data']
-            
-            # LMR Data
-            if 'lmr_data' in dyad_data and dyad_data['lmr_data']:
-                story.append(Paragraph("<b>Limites Máximos de Resíduos (LMR)</b>", styles['Heading4']))
-                
-                lmr_table_data = [['Substância', 'Limite UE (mg/kg)', 'Fonte']]
-                for lmr in dyad_data['lmr_data'][:5]:  # Mostrar até 5
-                    lmr_table_data.append([
-                        lmr.get('substance', 'N/A'),
-                        str(lmr.get('eu_limit_mg_kg', 'N/A')),
-                        lmr.get('source', 'N/A')
-                    ])
-                
-                lmr_table = Table(lmr_table_data, colWidths=[70*mm, 50*mm, 60*mm])
-                lmr_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e2e8f0')),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1a365d')),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 8),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ]))
-                
-                story.append(lmr_table)
-                story.append(Spacer(1, 5*mm))
-            
-            # Barreiras
-            if 'barriers' in dyad_data and dyad_data['barriers']:
-                story.append(Paragraph("<b>Barreiras Não-Tarifárias</b>", styles['Heading4']))
-                for barrier in dyad_data['barriers'][:5]:
-                    story.append(Paragraph(f"• {barrier}", styles['Normal']))
-                story.append(Spacer(1, 5*mm))
         
         # Rodapé
         story.append(Spacer(1, 10*mm))
@@ -674,8 +781,10 @@ class ZOIReportGenerator:
             textColor=colors.grey,
             alignment=TA_CENTER
         )
+        
+        timestamp = datetime.now().strftime('%d/%m/%Y às %H:%M:%S')
         story.append(Paragraph(
-            f"Relatório gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')} | ZOI Trade Advisory © 2026",
+            f"Relatório gerado em {timestamp} | ZOI Sentinel © 2026",
             footer_style
         ))
         
@@ -685,10 +794,10 @@ class ZOIReportGenerator:
 
 
 # ==================================================================================
-# CONFIGURAÇÃO FASTAPI
+# FASTAPI
 # ==================================================================================
 
-app = FastAPI(title="ZOI Trade Advisory API", version="2.1")
+app = FastAPI(title="ZOI Sentinel API", version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -698,10 +807,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Segurança JWT
-SECRET_KEY = os.environ.get("SECRET_KEY", "zoi_secret_key_2024_production")
+SECRET_KEY = os.environ.get("SECRET_KEY", "zoi_sentinel_secret_2026")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 dias
+ACCESS_TOKEN_EXPIRE_MINUTES = 10080
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -749,20 +857,6 @@ class ProductBase(BaseModel):
     critical_substances: Optional[List[str]] = None
 
 
-class ProductResponse(ProductBase):
-    id: int
-    created_at: datetime
-    
-    class Config:
-        from_attributes = True
-
-
-class RiskCalculationRequest(BaseModel):
-    product_key: str
-    rasff_alerts_6m: int = 0
-    rasff_alerts_12m: int = 0
-
-
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
@@ -776,7 +870,7 @@ class Token(BaseModel):
 
 
 # ==================================================================================
-# DEPENDÊNCIAS E AUTENTICAÇÃO
+# DEPENDÊNCIAS
 # ==================================================================================
 
 def get_db():
@@ -806,43 +900,284 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db: SessionLocal = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
+# ==================================================================================
+# 🎯 FUNÇÃO PRINCIPAL: GET_PRODUCT_ANALYSIS COM SOBERANIA DE DADOS
+# ==================================================================================
+
+def get_product_analysis(product_key: str, db: SessionLocal, force_refresh: bool = False) -> Dict[str, Any]:
+    """
+    🎯 FUNÇÃO CENTRAL DE SOBERANIA DE DADOS
     
-    user = db.query(User).filter(User.email == email).first()
-    if user is None:
-        raise credentials_exception
-    return user
+    REGRAS:
+    1. SEMPRE chama Dyad AI se houver NCM válido
+    2. Salva dados da IA no banco IMEDIATAMENTE
+    3. Sobrescreve dados antigos
+    4. Retorna dados frescos da IA
+    5. Fallback para banco apenas se Dyad falhar
+    """
+    
+    logger.info(f"\n{'='*80}")
+    logger.info(f"🎯 GET_PRODUCT_ANALYSIS - Produto: {product_key}")
+    logger.info(f"{'='*80}")
+    
+    # 1. Buscar produto no banco
+    product = db.query(Product).filter(Product.key == product_key).first()
+    if not product:
+        logger.error(f"❌ Produto {product_key} não encontrado no banco")
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    logger.info(f"✅ Produto encontrado: {product.name_pt}")
+    
+    # 2. ⚠️ VALIDAÇÃO CRÍTICA DE NCM
+    if not product.ncm_code or product.ncm_code.strip() == "":
+        logger.error(f"❌ ERRO CRÍTICO: Lovable não enviou o NCM para o produto '{product.name_pt}' (key: {product_key})")
+        logger.error(f"⚠️ AÇÃO NECESSÁRIA: Verificar integração com frontend Lovable")
+        
+        # Retornar erro estruturado
+        return {
+            "product": {
+                "id": product.id,
+                "key": product.key,
+                "name_pt": product.name_pt,
+                "name_it": product.name_it,
+                "ncm_code": "ERRO: NCM NÃO FORNECIDO",
+                "hs_code": product.hs_code,
+                "direction": product.direction.value,
+                "state": product.state.value
+            },
+            "risk_analysis": {
+                "score": 50.0,
+                "status": "yellow",
+                "status_label": "ERRO: Análise Impossível (NCM ausente)",
+                "risk_factors": ["ERRO CRÍTICO: NCM não fornecido pelo frontend"],
+                "compliance_alerts": ["Impossível analisar compliance sem código NCM"],
+                "technical_specs": [],
+                "data_source": "error"
+            },
+            "error": "NCM não fornecido"
+        }
+    
+    logger.info(f"✅ NCM válido: {product.ncm_code}")
+    
+    # 3. Verificar se precisa atualizar dados
+    should_refresh = force_refresh
+    
+    if not force_refresh and product.dyad_last_sync:
+        time_since_sync = datetime.utcnow() - product.dyad_last_sync
+        should_refresh = time_since_sync > timedelta(hours=24)
+        
+        if not should_refresh:
+            logger.info(f"📂 Dados recentes encontrados (última sync: {product.dyad_last_sync})")
+    else:
+        should_refresh = True
+        logger.info(f"🔄 Primeira sincronização ou forçada")
+    
+    # 4. 🧠 BUSCAR DADOS NA DYAD AI (SOBERANIA)
+    dyad_data = None
+    if should_refresh:
+        logger.info(f"🧠 Iniciando busca na Dyad AI (Data Sovereignty)")
+        
+        dyad = DyadComplianceNavigator()
+        dyad_data = dyad.get_compliance_intelligence(
+            ncm_code=product.ncm_code,
+            product_name=product.name_pt,
+            target_market="EU"
+        )
+        
+        if dyad_data:
+            logger.info(f"✅ SOBERANIA: Dados obtidos da Dyad AI")
+            
+            # 5. 💾 SALVAR DADOS NO BANCO IMEDIATAMENTE (SOBRESCREVER)
+            try:
+                logger.info(f"💾 Salvando dados da Dyad no banco (sobrescrevendo dados antigos)...")
+                
+                # ⭐ Atualizar campos do produto
+                product.risk_factors = dyad_data.get('risk_factors', [])
+                product.compliance_alerts = dyad_data.get('compliance_alerts', [])
+                product.technical_specs = dyad_data.get('technical_specs', [])
+                product.dyad_last_sync = datetime.utcnow()
+                product.dyad_data_quality = dyad_data.get('data_quality', {})
+                
+                # Atualizar certificações
+                certs = dyad_data.get('certifications', {})
+                if certs:
+                    product.requires_phytosanitary_cert = certs.get('phytosanitary', True)
+                    product.requires_health_cert = certs.get('health', False)
+                    product.requires_origin_cert = certs.get('origin', True)
+                
+                # Salvar/atualizar dados LMR
+                lmr_list = dyad_data.get('lmr_data', [])
+                if lmr_list:
+                    logger.info(f"💾 Salvando {len(lmr_list)} substâncias LMR...")
+                    
+                    for lmr_item in lmr_list[:15]:
+                        substance = lmr_item.get('substance', '').strip()
+                        if not substance:
+                            continue
+                        
+                        existing = db.query(LMRData).filter(
+                            LMRData.product_id == product.id,
+                            LMRData.substance == substance
+                        ).first()
+                        
+                        eu_limit = lmr_item.get('eu_limit_mg_kg')
+                        br_limit = lmr_item.get('br_limit_mg_kg')
+                        
+                        if existing:
+                            if eu_limit is not None:
+                                existing.dest_lmr = float(eu_limit)
+                            if br_limit is not None:
+                                existing.source_lmr = float(br_limit)
+                            existing.source_authority = "Dyad AI"
+                            existing.last_updated = datetime.utcnow()
+                            logger.info(f"  ↻ Atualizado: {substance}")
+                        else:
+                            new_lmr = LMRData(
+                                product_id=product.id,
+                                substance=substance,
+                                dest_lmr=float(eu_limit) if eu_limit is not None else None,
+                                source_lmr=float(br_limit) if br_limit is not None else None,
+                                source_authority="Dyad AI",
+                                regulatory_source=lmr_item.get('source', '')
+                            )
+                            db.add(new_lmr)
+                            logger.info(f"  + Criado: {substance}")
+                
+                # Criar novo Risk Assessment
+                calc = EnhancedRiskCalculator()
+                risk_result = calc.calculate_from_dyad(dyad_data)
+                
+                rasff = dyad_data.get('rasff_alerts', {})
+                
+                assessment = RiskAssessment(
+                    product_id=product.id,
+                    final_score=risk_result['score'],
+                    status=RiskStatusDB(risk_result['status']),
+                    rasff_score=risk_result['components']['Sanitário'],
+                    lmr_score=risk_result['components']['Fitossanitário'],
+                    phyto_score=risk_result['components']['Fitossanitário'],
+                    logistic_score=risk_result['components']['Logístico'],
+                    penalty=100 - risk_result['score'],
+                    rasff_alerts_6m=rasff.get('last_6_months', 0),
+                    rasff_alerts_12m=rasff.get('last_12_months', 0),
+                    recommendations=risk_result['recommendations'],
+                    data_source='dyad_ai',
+                    dyad_metadata=dyad_data.get('_metadata', {})
+                )
+                db.add(assessment)
+                
+                # Commit tudo
+                db.commit()
+                db.refresh(product)
+                
+                logger.info(f"✅ SOBERANIA ESTABELECIDA: Todos os dados salvos no banco")
+                logger.info(f"   - risk_factors: {len(product.risk_factors)} fatores")
+                logger.info(f"   - compliance_alerts: {len(product.compliance_alerts)} alertas")
+                logger.info(f"   - technical_specs: {len(product.technical_specs)} specs")
+                logger.info(f"   - LMR data: {len(lmr_list)} substâncias")
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao salvar dados da Dyad: {e}")
+                db.rollback()
+                import traceback
+                traceback.print_exc()
+        else:
+            logger.warning(f"⚠️ Dyad não retornou dados, usando dados do banco como fallback")
+    
+    # 6. MONTAR RESPOSTA COM DADOS MAIS RECENTES DO BANCO
+    logger.info(f"📦 Montando resposta com dados do banco...")
+    
+    latest_assessment = db.query(RiskAssessment).filter(
+        RiskAssessment.product_id == product.id
+    ).order_by(RiskAssessment.calculation_timestamp.desc()).first()
+    
+    if latest_assessment:
+        risk_analysis = {
+            "score": float(latest_assessment.final_score),
+            "status": latest_assessment.status.value,
+            "status_label": {
+                'green': 'Baixo Risco',
+                'yellow': 'Risco Moderado',
+                'red': 'Alto Risco'
+            }.get(latest_assessment.status.value, 'Risco Moderado'),
+            "components": {
+                "Sanitário": float(latest_assessment.rasff_score or 0),
+                "Fitossanitário": float(latest_assessment.lmr_score or 0),
+                "Logístico": float(latest_assessment.logistic_score or 0),
+                "Documental": float(latest_assessment.penalty or 0)
+            },
+            "recommendations": latest_assessment.recommendations or [],
+            "alerts": {
+                "rasff_6m": latest_assessment.rasff_alerts_6m,
+                "rasff_12m": latest_assessment.rasff_alerts_12m
+            },
+            "risk_factors": product.risk_factors or [],
+            "compliance_alerts": product.compliance_alerts or [],
+            "technical_specs": product.technical_specs or [],
+            "data_source": latest_assessment.data_source or 'database',
+            "last_updated": product.dyad_last_sync.isoformat() if product.dyad_last_sync else None
+        }
+    else:
+        risk_analysis = {
+            "score": 75.0,
+            "status": "yellow",
+            "status_label": "Risco Moderado",
+            "components": {},
+            "recommendations": [],
+            "alerts": {"rasff_6m": 0, "rasff_12m": 0},
+            "risk_factors": product.risk_factors or [],
+            "compliance_alerts": product.compliance_alerts or [],
+            "technical_specs": product.technical_specs or [],
+            "data_source": "database",
+            "last_updated": None
+        }
+    
+    result = {
+        "product": {
+            "id": product.id,
+            "key": product.key,
+            "name_pt": product.name_pt,
+            "name_it": product.name_it,
+            "name_en": product.name_en,
+            "ncm_code": product.ncm_code,
+            "hs_code": product.hs_code,
+            "direction": product.direction.value,
+            "state": product.state.value,
+            "category": product.category,
+            "requires_phytosanitary_cert": product.requires_phytosanitary_cert,
+            "requires_health_cert": product.requires_health_cert,
+            "requires_origin_cert": product.requires_origin_cert
+        },
+        "risk_analysis": risk_analysis,
+        "dyad_raw_data": dyad_data
+    }
+    
+    logger.info(f"✅ Resposta montada com sucesso")
+    logger.info(f"📊 Fonte de dados: {risk_analysis['data_source']}")
+    logger.info(f"{'='*80}\n")
+    
+    return result
 
 
 # ==================================================================================
-# ROTAS PRINCIPAIS
+# ROTAS
 # ==================================================================================
 
 @app.get("/")
 def root():
     return {
-        "service": "ZOI Trade Advisory API",
-        "version": "2.1",
+        "service": "ZOI Sentinel API",
+        "version": "3.0",
         "status": "operational",
         "features": [
-            "Dyad AI Integration",
-            "Real-time Compliance Analysis",
-            "Risk Assessment",
-            "PDF Export"
+            "🧠 AI Data Sovereignty (Dyad)",
+            "📡 Real-time Compliance Intelligence",
+            "🎯 Risk Assessment",
+            "📄 PDF Export",
+            "🔄 Auto-sync Database"
         ],
-        "dyad_configured": bool(os.environ.get('DYAD_API_KEY'))
+        "dyad_configured": bool(os.environ.get('DYAD_API_KEY')),
+        "data_sovereignty": "Dyad AI is the primary source of truth"
     }
 
 
@@ -857,265 +1192,63 @@ def list_products(db: SessionLocal = Depends(get_db)):
             "name_it": p.name_it,
             "ncm_code": p.ncm_code,
             "direction": p.direction.value,
-            "state": p.state.value
+            "state": p.state.value,
+            "last_sync": p.dyad_last_sync.isoformat() if p.dyad_last_sync else None
         }
         for p in products
     ]
 
 
 @app.get("/api/products/{product_key}")
-def get_product(product_key: str, db: SessionLocal = Depends(get_db)):
-    product = db.query(Product).filter(Product.key == product_key).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
+def get_product(product_key: str, refresh: bool = False, db: SessionLocal = Depends(get_db)):
+    """
+    Retorna análise completa do produto com dados da Dyad AI.
     
-    return {
-        "id": product.id,
-        "key": product.key,
-        "name_pt": product.name_pt,
-        "name_it": product.name_it,
-        "name_en": product.name_en,
-        "ncm_code": product.ncm_code,
-        "hs_code": product.hs_code,
-        "direction": product.direction.value,
-        "state": product.state.value,
-        "category": product.category,
-        "requires_phytosanitary_cert": product.requires_phytosanitary_cert,
-        "requires_health_cert": product.requires_health_cert,
-        "requires_origin_cert": product.requires_origin_cert
-    }
+    Query params:
+        refresh: Se True, força nova busca na Dyad AI
+    """
+    return get_product_analysis(product_key, db, force_refresh=refresh)
 
 
 # ==================================================================================
-# ROTA PRINCIPAL: EXPORT PDF COM INTEGRAÇÃO DYAD
+# 📄 ROTA: EXPORT PDF COM SINCRONIZAÇÃO TOTAL
 # ==================================================================================
 
 @app.get("/api/products/{product_key}/export-pdf")
 def export_risk_pdf(product_key: str, db: SessionLocal = Depends(get_db)):
     """
-    Gera PDF de análise de risco com dados em tempo real da Dyad AI.
+    📄 GERA PDF COM DADOS IDÊNTICOS AO APLICATIVO
     
-    Fluxo:
-    1. Busca produto no banco
-    2. Tenta obter dados atualizados via Dyad AI
-    3. Se Dyad falhar, usa dados do banco como fallback
-    4. Calcula risco com dados disponíveis
-    5. Gera PDF profissional
+    Garante que o PDF mostre exatamente os mesmos dados que o usuário vê na tela.
     """
-    print(f"\n{'='*80}")
-    print(f"📄 GERAÇÃO DE PDF INICIADA - Produto: {product_key}")
-    print(f"{'='*80}\n")
+    logger.info(f"\n{'='*80}")
+    logger.info(f"📄 GERAÇÃO DE PDF - Produto: {product_key}")
+    logger.info(f"{'='*80}\n")
     
-    # 1. Buscar produto no banco
-    product = db.query(Product).filter(Product.key == product_key).first()
-    if not product:
-        print(f"❌ Produto {product_key} não encontrado no banco")
-        raise HTTPException(status_code=404, detail="Product not found")
+    # 1. Obter análise completa (que já busca Dyad se necessário)
+    analysis = get_product_analysis(product_key, db, force_refresh=False)
     
-    print(f"✅ Produto encontrado: {product.name_pt} (NCM: {product.ncm_code})")
+    product_data = analysis['product']
+    risk_data = analysis['risk_analysis']
+    dyad_raw = analysis.get('dyad_raw_data')
     
-    # 2. Inicializar navegador Dyad e buscar dados em tempo real
-    dyad = DyadComplianceNavigator()
-    dyad_compliance_data = None
+    logger.info(f"📊 Gerando PDF com dados de: {risk_data['data_source']}")
     
-    try:
-        print(f"\n🧠 Tentando buscar dados atualizados via Dyad AI...")
-        dyad_compliance_data = dyad.search_compliance_data(
-            ncm_code=product.ncm_code,
-            product_name=product.name_pt,
-            target_market="EU"
-        )
-        
-        if dyad_compliance_data:
-            print(f"✅ Dados da Dyad obtidos com sucesso!")
-            
-            # Atualizar dados do banco com informações da Dyad
-            rasff_alerts = dyad_compliance_data.get('rasff_alerts', {})
-            rasff_6m = rasff_alerts.get('last_6_months', 0)
-            rasff_12m = rasff_alerts.get('last_12_months', 0)
-            
-            print(f"📊 Alertas RASFF da Dyad: 6m={rasff_6m}, 12m={rasff_12m}")
-            
-            # Salvar dados LMR no banco
-            lmr_data_list = dyad_compliance_data.get('lmr_data', [])
-            for lmr_item in lmr_data_list[:10]:  # Limitar a 10 substâncias
-                substance_name = lmr_item.get('substance', '')
-                eu_limit = lmr_item.get('eu_limit_mg_kg')
-                
-                if substance_name and eu_limit is not None:
-                    existing_lmr = db.query(LMRData).filter(
-                        LMRData.product_id == product.id,
-                        LMRData.substance == substance_name
-                    ).first()
-                    
-                    if not existing_lmr:
-                        new_lmr = LMRData(
-                            product_id=product.id,
-                            substance=substance_name,
-                            dest_lmr=float(eu_limit),
-                            source_authority="Dyad AI / EU Database"
-                        )
-                        db.add(new_lmr)
-                        print(f"💾 Salvando LMR: {substance_name} = {eu_limit} mg/kg")
-            
-            db.commit()
-            
-        else:
-            print(f"⚠️ Dyad não retornou dados, usando fallback do banco")
-            rasff_6m = 0
-            rasff_12m = 0
-            
-    except Exception as e:
-        print(f"❌ Erro ao buscar dados da Dyad: {e}")
-        dyad_compliance_data = None
-        rasff_6m = 0
-        rasff_12m = 0
+    # 2. Gerar PDF
+    generator = ZOISentinelReportGenerator()
+    pdf_buffer = generator.generate_risk_pdf(product_data, risk_data, dyad_raw)
     
-    # 3. Se não temos dados da Dyad, buscar última avaliação do banco
-    if not dyad_compliance_data:
-        latest_assessment = db.query(RiskAssessment).filter(
-            RiskAssessment.product_id == product.id
-        ).order_by(RiskAssessment.calculation_timestamp.desc()).first()
-        
-        if latest_assessment:
-            rasff_6m = latest_assessment.rasff_alerts_6m
-            rasff_12m = latest_assessment.rasff_alerts_12m
-            print(f"📂 Usando dados da última avaliação do banco: 6m={rasff_6m}, 12m={rasff_12m}")
+    logger.info(f"✅ PDF gerado com sucesso!")
+    logger.info(f"{'='*80}\n")
     
-    # 4. Calcular risco
-    print(f"\n🧮 Calculando score de risco...")
-    calc = EnhancedRiskCalculator()
-    risk_result = calc.calculate(product, rasff_6m, rasff_12m)
-    
-    # Adicionar dados da Dyad ao resultado
-    if dyad_compliance_data:
-        risk_result['dyad_data'] = dyad_compliance_data
-        risk_result['data_source'] = 'dyad_ai'
-    else:
-        risk_result['data_source'] = 'database_fallback'
-    
-    print(f"✅ Score calculado: {risk_result['score']:.1f} - Status: {risk_result['status_label']}")
-    
-    # 5. Gerar PDF
-    print(f"\n📄 Gerando PDF...")
-    
-    product_data = {
-        "name_pt": product.name_pt,
-        "name_it": product.name_it,
-        "ncm_code": product.ncm_code,
-        "direction": product.direction.value,
-        "state": product.state.value
-    }
-    
-    generator = ZOIReportGenerator()
-    pdf_buffer = generator.generate_risk_pdf(product_data, risk_result)
-    
-    print(f"✅ PDF gerado com sucesso!")
-    print(f"{'='*80}\n")
-    
-    # 6. Retornar PDF
+    # 3. Retornar PDF
     return StreamingResponse(
         pdf_buffer,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f"attachment; filename=zoi_risk_report_{product_key}.pdf"
+            "Content-Disposition": f"attachment; filename=zoi_sentinel_{product_key}.pdf"
         }
     )
-
-
-# ==================================================================================
-# SCRAPER ANVISA (Mantido como fallback secundário)
-# ==================================================================================
-
-class AnvisaLMRScraper:
-    
-    def __init__(self):
-        self.base_url = "https://www.gov.br/anvisa/pt-br/assuntos/agrotoxicos/monografias-de-agrotoxicos"
-        
-    def search_lmr(self, product_name: str) -> Optional[Dict]:
-        try:
-            response = requests.get(self.base_url, timeout=10)
-            if response.status_code != 200:
-                return None
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            links = soup.find_all('a', href=True)
-            
-            for link in links:
-                link_text = link.get_text().lower()
-                if any(term in link_text for term in ["carbendazim", "imazalil", "tiabendazol"]):
-                    return {
-                        'substance': link.get_text().strip(),
-                        'lmr_mg_kg': 0.1,
-                        'source': 'ANVISA',
-                        'url': link['href']
-                    }
-            
-            return None
-            
-        except Exception as e:
-            print(f"Erro no scraper ANVISA: {e}")
-            return None
-
-
-def run_initial_scraping(product_name: str, product_key: str):
-    print(f"\n{'='*60}")
-    print(f"🔍 AUDITORIA ANVISA INICIADA")
-    print(f"Produto: {product_name}")
-    print(f"Key: {product_key}")
-    print(f"{'='*60}\n")
-    
-    from sqlalchemy.orm import Session
-    
-    try:
-        scraper = AnvisaLMRScraper()
-        
-        search_terms = [
-            product_name,
-            product_name.split()[0] if ' ' in product_name else None
-        ]
-        
-        for term in search_terms:
-            if not term:
-                continue
-                
-            print(f"🔎 Buscando LMR para: {term}")
-            results = scraper.search_lmr(term)
-            
-            if results:
-                print(f"✅ Encontrado: {results['substance']}")
-                
-                with Session(engine) as session:
-                    product = session.query(Product).filter(Product.key == product_key).first()
-                    
-                    if product:
-                        existing_lmr = session.query(LMRData).filter(
-                            LMRData.product_id == product.id,
-                            LMRData.substance == results['substance']
-                        ).first()
-                        
-                        if not existing_lmr:
-                            new_lmr = LMRData(
-                                product_id=product.id,
-                                substance=results['substance'],
-                                dest_lmr=results['lmr_mg_kg'],
-                                source_authority=results.get('source', 'ANVISA')
-                            )
-                            session.add(new_lmr)
-                            session.commit()
-                            
-                            print(f"💾 LMR salvo no banco: {results['substance']} = {results['lmr_mg_kg']} mg/kg")
-                        else:
-                            print(f"ℹ️ LMR já existe no banco para {results['substance']}")
-                
-                break
-        
-        print(f"\n✅ Auditoria concluída para {product_name}")
-        print(f"{'='*60}\n")
-        
-    except Exception as e:
-        print(f"\n❌ Erro na auditoria de {product_name}: {e}")
-        print(f"{'='*60}\n")
 
 
 # ==================================================================================
@@ -1123,130 +1256,75 @@ def run_initial_scraping(product_name: str, product_key: str):
 # ==================================================================================
 
 @app.post("/api/admin/products")
-def create_product(product_data: dict, background_tasks: BackgroundTasks):
-    from sqlalchemy.orm import Session
+def create_product(product_data: dict, background_tasks: BackgroundTasks, db: SessionLocal = Depends(get_db)):
+    """
+    Cria novo produto e IMEDIATAMENTE busca dados na Dyad.
+    """
+    logger.info(f"\n📝 Criando novo produto: {product_data.get('name_pt', 'N/A')}")
     
-    print(f"\n📝 Criando novo produto: {product_data.get('name_pt', 'N/A')}")
+    # Validação crítica de NCM
+    ncm = product_data.get("ncm_code", "").strip()
+    if not ncm:
+        logger.error(f"❌ ERRO CRÍTICO: Tentativa de criar produto sem NCM!")
+        raise HTTPException(status_code=400, detail="NCM code is required")
     
-    with Session(engine) as session:
-        try:
-            new_p = Product(
-                key=product_data["key"],
-                name_pt=product_data["name_pt"],
-                name_it=product_data.get("name_it", product_data["name_pt"]),
-                ncm_code=product_data["ncm_code"],
-                hs_code=product_data["ncm_code"][:6],
-                direction=TradeDirectionDB(product_data["direction"]),
-                state=ProductStateDB(product_data["state"]),
-                requires_phytosanitary_cert=product_data.get("requires_phytosanitary_cert", True)
-            )
-            session.add(new_p)
-            session.commit()
-            session.refresh(new_p)
-            
-            print(f"✅ Produto '{new_p.name_pt}' criado com ID {new_p.id}")
-            print(f"🚀 Iniciando auditoria ANVISA em segundo plano...")
-            
-            background_tasks.add_task(run_initial_scraping, new_p.name_pt, new_p.key)
-            
-            return {
-                "status": "success", 
-                "message": f"Produto '{new_p.name_pt}' criado com sucesso. Auditoria ANVISA iniciada.",
-                "product_key": new_p.key
-            }
-            
-        except Exception as e:
-            session.rollback()
-            print(f"❌ Erro ao criar produto: {e}")
-            return {"status": "error", "message": str(e)}
+    try:
+        new_p = Product(
+            key=product_data["key"],
+            name_pt=product_data["name_pt"],
+            name_it=product_data.get("name_it", product_data["name_pt"]),
+            ncm_code=ncm,
+            hs_code=ncm[:6],
+            direction=TradeDirectionDB(product_data["direction"]),
+            state=ProductStateDB(product_data["state"]),
+            requires_phytosanitary_cert=product_data.get("requires_phytosanitary_cert", True)
+        )
+        db.add(new_p)
+        db.commit()
+        db.refresh(new_p)
+        
+        logger.info(f"✅ Produto '{new_p.name_pt}' criado com ID {new_p.id}")
+        logger.info(f"🧠 Iniciando busca Dyad em segundo plano...")
+        
+        # Disparar busca Dyad em background
+        background_tasks.add_task(get_product_analysis, new_p.key, db, True)
+        
+        return {
+            "status": "success",
+            "message": f"Produto '{new_p.name_pt}' criado. Análise Dyad AI iniciada.",
+            "product_key": new_p.key
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao criar produto: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/admin/products/{product_key}")
-def delete_product(product_key: str):
-    from sqlalchemy.orm import Session
-    
-    print(f"🗑️ Removendo produto: {product_key}")
-    
-    with Session(engine) as session:
-        product = session.query(Product).filter(Product.key == product_key).first()
-        if product:
-            session.delete(product)
-            session.commit()
-            print(f"✅ Produto {product_key} removido com sucesso")
-            return {"status": "success", "message": f"Produto {product_key} removido"}
-        
-        print(f"⚠️ Produto {product_key} não encontrado")
-        return {"status": "error", "message": "Produto não encontrado"}
-
-
-@app.post("/api/risk/calculate")
-def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(get_db)):
-    print(f"🧮 Calculando risco para produto: {request.product_key}")
-    
-    product = db.query(Product).filter(Product.key == request.product_key).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    
-    rasff_alerts_6m = request.rasff_alerts_6m
-    rasff_alerts_12m = request.rasff_alerts_12m
-    
-    if rasff_alerts_6m == 0 and rasff_alerts_12m == 0:
-        print("📊 Nenhum alerta RASFF fornecido, usando perfil histórico do NCM")
-        profile = NCM_RISK_PROFILES.get(product.ncm_code)
-        if profile:
-            rasff_alerts_12m = profile.get('historical_rejections', 0)
-            rasff_alerts_6m = min(rasff_alerts_12m // 2, rasff_alerts_12m)
-            print(f"📈 Alertas estimados: 6m={rasff_alerts_6m}, 12m={rasff_alerts_12m}")
-    
-    calc = EnhancedRiskCalculator()
-    result = calc.calculate(product, rasff_alerts_6m, rasff_alerts_12m)
-    
-    try:
-        assessment = RiskAssessment(
-            product_id=product.id,
-            final_score=result['score'],
-            status=RiskStatusDB(result['status']),
-            rasff_score=result['components']['Sanitário'],
-            lmr_score=result['components']['Fitossanitário'],
-            phyto_score=result['components']['Fitossanitário'],
-            logistic_score=result['components']['Logístico'],
-            penalty=100 - result['score'],
-            rasff_alerts_6m=rasff_alerts_6m,
-            rasff_alerts_12m=rasff_alerts_12m,
-            recommendations=result['recommendations']
-        )
-        db.add(assessment)
+def delete_product(product_key: str, db: SessionLocal = Depends(get_db)):
+    product = db.query(Product).filter(Product.key == product_key).first()
+    if product:
+        db.delete(product)
         db.commit()
-        print(f"✅ Avaliação de risco salva no banco de dados")
-    except Exception as e:
-        print(f"⚠️ Erro ao salvar avaliação: {e}")
+        logger.info(f"✅ Produto {product_key} removido")
+        return {"status": "success", "message": f"Produto {product_key} removido"}
     
-    return {
-        "score": float(result["score"]),
-        "status": str(result["status"]),
-        "status_label": str(result["status_label"]),
-        "components": {
-            "Sanitário": float(result["components"]["Sanitário"]),
-            "Fitossanitário": float(result["components"]["Fitossanitário"]),
-            "Logístico": float(result["components"]["Logístico"]),
-            "Documental": float(result["components"]["Documental"])
-        },
-        "recommendations": [str(r) for r in result["recommendations"]],
-        "alerts": {
-            "rasff_6m": int(result["alerts"]["rasff_6m"]),
-            "rasff_12m": int(result["alerts"]["rasff_12m"]),
-            "historical_rejections": int(result["alerts"]["historical_rejections"])
-        },
-        "product_info": {
-            "name": str(product.name_pt), 
-            "ncm": str(product.ncm_code),
-            "direction": str(product.direction.value)
-        }
-    }
+    logger.warning(f"⚠️ Produto {product_key} não encontrado")
+    raise HTTPException(status_code=404, detail="Produto não encontrado")
+
+
+@app.post("/api/products/{product_key}/refresh")
+def force_refresh(product_key: str, db: SessionLocal = Depends(get_db)):
+    """
+    Força atualização dos dados via Dyad AI.
+    """
+    logger.info(f"🔄 Forçando refresh para produto: {product_key}")
+    return get_product_analysis(product_key, db, force_refresh=True)
 
 
 # ==================================================================================
-# ROTAS DE USUÁRIOS E AUTENTICAÇÃO
+# AUTENTICAÇÃO
 # ==================================================================================
 
 @app.post("/api/users", status_code=status.HTTP_201_CREATED)
@@ -1294,6 +1372,9 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
     total_assessments = db.query(RiskAssessment).count()
     total_users = db.query(User).count()
     
+    recent_sync = datetime.utcnow() - timedelta(hours=24)
+    synced_products = db.query(Product).filter(Product.dyad_last_sync >= recent_sync).count()
+    
     green_count = db.query(RiskAssessment).filter(RiskAssessment.status == RiskStatusDB.GREEN).count()
     yellow_count = db.query(RiskAssessment).filter(RiskAssessment.status == RiskStatusDB.YELLOW).count()
     red_count = db.query(RiskAssessment).filter(RiskAssessment.status == RiskStatusDB.RED).count()
@@ -1302,11 +1383,13 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
         "total_products": total_products,
         "total_assessments": total_assessments,
         "total_users": total_users,
+        "synced_products_24h": synced_products,
         "status_distribution": {
             "green": green_count,
             "yellow": yellow_count,
             "red": red_count
-        }
+        },
+        "dyad_configured": bool(os.environ.get('DYAD_API_KEY'))
     }
 
 
@@ -1316,13 +1399,18 @@ def get_admin_stats(db: SessionLocal = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
+    
     Base.metadata.create_all(bind=engine)
+    
     port = int(os.environ.get("PORT", 8000))
-    print(f"\n{'='*80}")
-    print(f"🚀 ZOI Trade Advisory API v2.1 - Iniciando")
-    print(f"{'='*80}")
-    print(f"🔌 Porta: {port}")
-    print(f"🧠 Dyad AI: {'✅ Configurado' if os.environ.get('DYAD_API_KEY') else '❌ Não configurado'}")
-    print(f"💾 Database: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'Local'}")
-    print(f"{'='*80}\n")
+    
+    logger.info(f"\n{'='*80}")
+    logger.info(f"🛡️ ZOI SENTINEL API v3.0 - INICIANDO")
+    logger.info(f"{'='*80}")
+    logger.info(f"🔌 Porta: {port}")
+    logger.info(f"🧠 Dyad AI: {'✅ Configurado' if os.environ.get('DYAD_API_KEY') else '❌ Não configurado'}")
+    logger.info(f"💾 Database: {DATABASE_URL.split('@')[1] if '@' in DATABASE_URL else 'Local'}")
+    logger.info(f"📡 Data Sovereignty: ATIVADA")
+    logger.info(f"{'='*80}\n")
+    
     uvicorn.run(app, host="0.0.0.0", port=port)
