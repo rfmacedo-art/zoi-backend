@@ -280,6 +280,59 @@ REGRAS CRÍTICAS:
 # MODELOS DO BANCO DE DADOS
 # ==================================================================================
 
+
+# ==================================================================================
+# PERFIS DE RISCO NCM
+# ==================================================================================
+
+NCM_RISK_PROFILES = {
+    "08055000": {
+        "name": "Limão/Lima",
+        "eu_barriers": "high",
+        "historical_rejections": 12,
+        "sanitario_base": 75.0,
+        "fitossanitario_base": 68.0,
+        "logistico_base": 85.0,
+        "documental_base": 72.0
+    },
+    "12019000": {
+        "name": "Soja em Grãos",
+        "eu_barriers": "medium",
+        "historical_rejections": 5,
+        "sanitario_base": 88.0,
+        "fitossanitario_base": 82.0,
+        "logistico_base": 92.0,
+        "documental_base": 85.0
+    },
+    "09011110": {
+        "name": "Café Cru",
+        "eu_barriers": "low",
+        "historical_rejections": 2,
+        "sanitario_base": 92.0,
+        "fitossanitario_base": 90.0,
+        "logistico_base": 88.0,
+        "documental_base": 95.0
+    },
+    "02023000": {
+        "name": "Carne Bovina",
+        "eu_barriers": "high",
+        "historical_rejections": 18,
+        "sanitario_base": 72.0,
+        "fitossanitario_base": 78.0,
+        "logistico_base": 65.0,
+        "documental_base": 68.0
+    },
+    "20091100": {
+        "name": "Suco de Laranja",
+        "eu_barriers": "medium",
+        "historical_rejections": 8,
+        "sanitario_base": 80.0,
+        "fitossanitario_base": 75.0,
+        "logistico_base": 88.0,
+        "documental_base": 82.0
+    }
+}
+
 Base = declarative_base()
 
 
@@ -794,6 +847,67 @@ class UserCreate(BaseModel):
     company: Optional[str] = None
 
 
+
+class RiskCalculationRequest(BaseModel):
+    product_key: str
+    rasff_alerts_6m: int = 0
+    rasff_alerts_12m: int = 0
+    lmr_data: List[dict] = []
+    phyto_alerts: List[dict] = []
+    transport_days: Optional[int] = None
+
+
+class TraditionalRiskCalculator:
+    """Calculadora de risco tradicional (sem Dyad AI)"""
+    
+    def calculate(self, product, rasff_6m: int, rasff_12m: int) -> dict:
+        profile = NCM_RISK_PROFILES.get(product.ncm_code, {
+            "sanitario_base": 85.0,
+            "fitossanitario_base": 80.0,
+            "logistico_base": 85.0,
+            "documental_base": 80.0,
+            "historical_rejections": 0
+        })
+        
+        sanitario = max(0, profile['sanitario_base'] - (rasff_6m * 10) - (rasff_12m * 4))
+        fitossanitario = profile['fitossanitario_base']
+        logistico = profile['logistico_base']
+        documental = profile['documental_base']
+        
+        final_score = (sanitario * 0.35 + fitossanitario * 0.30 + logistico * 0.20 + documental * 0.15)
+        
+        if final_score >= 80:
+            status, label = "green", "Baixo Risco"
+        elif final_score >= 60:
+            status, label = "yellow", "Risco Moderado"
+        else:
+            status, label = "red", "Alto Risco"
+        
+        recommendations = []
+        if sanitario < 75:
+            recommendations.append("Reforçar controles sanitários e rastreabilidade")
+        if fitossanitario < 75:
+            recommendations.append("Auditar uso de agrotóxicos e conformidade com LMRs")
+        
+        return {
+            "score": final_score,
+            "status": status,
+            "status_label": label,
+            "components": {
+                "Sanitário": sanitario,
+                "Fitossanitário": fitossanitario,
+                "Logístico": logistico,
+                "Documental": documental
+            },
+            "recommendations": recommendations,
+            "alerts": {
+                "rasff_6m": rasff_6m,
+                "rasff_12m": rasff_12m,
+                "historical_rejections": profile.get("historical_rejections", 0)
+            }
+        }
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -1254,6 +1368,79 @@ def force_refresh(product_key: str, db: SessionLocal = Depends(get_db)):
     logger.info(f"🔄 Forçando refresh para produto: {product_key}")
     return get_product_analysis(product_key, db, force_refresh=True)
 
+
+
+
+@app.post("/api/risk/calculate")
+def calculate_risk(request: RiskCalculationRequest, db: SessionLocal = Depends(get_db)):
+    """
+    Calcula risco usando método tradicional (sem Dyad AI).
+    Compatível com o frontend Lovable.
+    """
+    logger.info(f"🧮 Calculando risco (tradicional) para produto: {request.product_key}")
+    
+    product = db.query(Product).filter(Product.key == request.product_key).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    rasff_alerts_6m = request.rasff_alerts_6m
+    rasff_alerts_12m = request.rasff_alerts_12m
+    
+    if rasff_alerts_6m == 0 and rasff_alerts_12m == 0:
+        logger.info("📊 Nenhum alerta fornecido, usando perfil histórico do NCM")
+        profile = NCM_RISK_PROFILES.get(product.ncm_code)
+        if profile:
+            rasff_alerts_12m = profile.get('historical_rejections', 0)
+            rasff_alerts_6m = min(rasff_alerts_12m // 2, rasff_alerts_12m)
+            logger.info(f"📈 Alertas estimados: 6m={rasff_alerts_6m}, 12m={rasff_alerts_12m}")
+    
+    calc = TraditionalRiskCalculator()
+    result = calc.calculate(product, rasff_alerts_6m, rasff_alerts_12m)
+    
+    try:
+        assessment = RiskAssessment(
+            product_id=product.id,
+            final_score=result['score'],
+            status=RiskStatusDB(result['status']),
+            rasff_score=result['components']['Sanitário'],
+            lmr_score=result['components']['Fitossanitário'],
+            phyto_score=result['components']['Fitossanitário'],
+            logistic_score=result['components']['Logístico'],
+            penalty=100 - result['score'],
+            rasff_alerts_6m=rasff_alerts_6m,
+            rasff_alerts_12m=rasff_alerts_12m,
+            recommendations=result['recommendations']
+        )
+        if hasattr(assessment, 'data_source'):
+            assessment.data_source = 'manual'
+        db.add(assessment)
+        db.commit()
+        logger.info(f"✅ Avaliação de risco salva no banco de dados")
+    except Exception as e:
+        logger.warning(f"⚠️ Erro ao salvar avaliação: {e}")
+    
+    return {
+        "score": float(result["score"]),
+        "status": str(result["status"]),
+        "status_label": str(result["status_label"]),
+        "components": {
+            "Sanitário": float(result["components"]["Sanitário"]),
+            "Fitossanitário": float(result["components"]["Fitossanitário"]),
+            "Logístico": float(result["components"]["Logístico"]),
+            "Documental": float(result["components"]["Documental"])
+        },
+        "recommendations": [str(r) for r in result["recommendations"]],
+        "alerts": {
+            "rasff_6m": int(result["alerts"]["rasff_6m"]),
+            "rasff_12m": int(result["alerts"]["rasff_12m"]),
+            "historical_rejections": int(result["alerts"]["historical_rejections"])
+        },
+        "product_info": {
+            "name": str(product.name_pt),
+            "ncm": str(product.ncm_code),
+            "direction": str(product.direction.value)
+        }
+    }
 
 @app.post("/api/users", status_code=status.HTTP_201_CREATED)
 def create_user(user: UserCreate, db: SessionLocal = Depends(get_db)):
