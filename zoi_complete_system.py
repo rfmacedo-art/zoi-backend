@@ -1,917 +1,414 @@
 """
-ZOI Sentinel v4.0 - Zero Database Architecture
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ZOI Trade Advisory - Complete Production System
+Version 2.0 - Full Stack Implementation
 
-🧠 LIVING INTELLIGENCE SYSTEM
-   - Zero Dependency on Static Compliance Tables
-   - AI-Driven Real-Time Research (Manus AI / Dyad)
-   - 24-Hour Cache Strategy Only
-   - Premium PDF Reports (Business Class Design)
+Architecture:
+├── Data Layer (Scrapers + Database)
+├── Business Logic (Risk Engine + Validators)
+├── API Layer (FastAPI REST)
+├── Notification System (Email + Webhooks)
+└── Admin Dashboard (Management Interface)
 
-📡 DATA SOVEREIGNTY v2.0
-   - Manus AI Agent searches MAPA, ANVISA, Siscomex in real-time
-   - Database serves ONLY as 24h cache
-   - Mandatory fresh search if data > 24 hours old
-
-🎯 TARGET ARCHITECTURE
-   - Frontend Request → Check Cache (< 24h?) → If YES: Return
-   - If NO: Launch Manus AI → Wait for completion → Save → Return
-   - PDF Generation: ALWAYS wait for AI completion
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Dependencies:
+pip install fastapi uvicorn sqlalchemy psycopg2-binary alembic
+pip install selenium beautifulsoup4 requests pandas
+pip install pydantic python-multipart python-jose passlib
+pip install celery redis APScheduler sendgrid
 """
 
-import os
-import json
-import logging
-import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-from io import BytesIO
+# ============================================================================
+# 1. SCRAPER ANVISA (LMRs Brasileiros)
+# ============================================================================
 
+import re
 import requests
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, Text, Enum as SQLEnum
+from bs4 import BeautifulSoup
+from typing import Dict, List, Optional
+import json
+from pathlib import Path
+import time
+
+
+class ANVISAScraper:
+    """
+    Scraper para dados ANVISA (LMRs brasileiros)
+    Fonte: https://www.gov.br/anvisa/pt-br/assuntos/agrotoxicos
+    """
+    
+    BASE_URL = "https://www.gov.br/anvisa/pt-br"
+    MONOGRAFIA_URL = f"{BASE_URL}/assuntos/agrotoxicos/monografia"
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+    
+    def get_lmr_for_substance(self, substance: str, crop: str) -> Optional[Dict]:
+        """
+        Busca LMR brasileiro para substância + cultura
+        
+        Args:
+            substance: Nome da substância (ex: 'Glifosato')
+            crop: Nome da cultura (ex: 'Soja')
+        
+        Returns:
+            {'substance': str, 'crop': str, 'lmr_mg_kg': float, 'source': str}
+        """
+        
+        try:
+            # Buscar página da monografia
+            search_url = f"{self.MONOGRAFIA_URL}?ingrediente={substance.lower()}"
+            response = self.session.get(search_url, timeout=10)
+            
+            if response.status_code != 200:
+                print(f"[ANVISA] Erro ao acessar {substance}: {response.status_code}")
+                return None
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Extrair tabela de LMRs
+            lmr_table = soup.find('table', {'class': 'lmr-table'})
+            
+            if not lmr_table:
+                # Tentar estrutura alternativa
+                lmr_table = soup.find('table', string=re.compile('Limite Máximo'))
+            
+            if lmr_table:
+                rows = lmr_table.find_all('tr')
+                
+                for row in rows:
+                    cols = row.find_all('td')
+                    
+                    if len(cols) >= 2:
+                        crop_cell = cols[0].text.strip().lower()
+                        
+                        if crop.lower() in crop_cell:
+                            lmr_text = cols[1].text.strip()
+                            lmr_value = self._extract_number(lmr_text)
+                            
+                            if lmr_value is not None:
+                                return {
+                                    'substance': substance,
+                                    'crop': crop,
+                                    'lmr_mg_kg': lmr_value,
+                                    'source': 'ANVISA',
+                                    'url': search_url
+                                }
+            
+            # Fallback: Usar dados tabelados conhecidos
+            return self._get_fallback_lmr(substance, crop)
+            
+        except Exception as e:
+            print(f"[ANVISA] Erro ao processar {substance}: {e}")
+            return self._get_fallback_lmr(substance, crop)
+    
+    def _extract_number(self, text: str) -> Optional[float]:
+        """Extrai número do texto"""
+        match = re.search(r'(\d+\.?\d*)', text.replace(',', '.'))
+        return float(match.group(1)) if match else None
+    
+    def _get_fallback_lmr(self, substance: str, crop: str) -> Dict:
+        """
+        Dados de fallback baseados em tabelas ANVISA conhecidas
+        TODO: Expandir esta base de dados
+        """
+        
+        fallback_data = {
+            ('Glifosato', 'Soja'): 10.0,
+            ('Glifosato', 'Café'): 1.0,
+            ('Carbendazim', 'Laranja'): 2.0,
+            ('Carbendazim', 'Café'): 0.1,
+            ('Clorpirifós', 'Soja'): 0.5,
+            ('Tiabendazol', 'Laranja'): 5.0,
+        }
+        
+        lmr = fallback_data.get((substance, crop), 1.0)
+        
+        return {
+            'substance': substance,
+            'crop': crop,
+            'lmr_mg_kg': lmr,
+            'source': 'ANVISA_FALLBACK',
+            'url': self.MONOGRAFIA_URL
+        }
+    
+    def batch_collect(self, substances: List[str], crops: List[str]) -> List[Dict]:
+        """Coleta em lote de múltiplas substâncias × culturas"""
+        
+        results = []
+        
+        for substance in substances:
+            for crop in crops:
+                print(f"[ANVISA] Buscando {substance} × {crop}...")
+                result = self.get_lmr_for_substance(substance, crop)
+                
+                if result:
+                    results.append(result)
+                
+                time.sleep(1)  # Rate limiting
+        
+        return results
+
+
+# ============================================================================
+# 2. DATABASE SCHEMA (SQLAlchemy + PostgreSQL)
+# ============================================================================
+
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey, Enum as SQLEnum
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-from reportlab.pdfgen import canvas
+from sqlalchemy.orm import sessionmaker, relationship
+from datetime import datetime
+import enum
 
-# ══════════════════════════════════════════════════════════════════════════════
-# LOGGING CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
+Base = declarative_base()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("ZOI_SENTINEL_V4")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DATABASE CONFIGURATION (24-HOUR CACHE ONLY)
-# ══════════════════════════════════════════════════════════════════════════════
+class TradeDirectionDB(enum.Enum):
+    EXPORT = "export"
+    IMPORT = "import"
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://user:password@localhost:5432/zoi_db"
-).replace("postgres://", "postgresql://")
+
+class ProductStateDB(enum.Enum):
+    FRESH = "fresh"
+    FROZEN = "frozen"
+    AMBIENT = "ambient"
+
+
+class RiskStatusDB(enum.Enum):
+    GREEN = "green"
+    YELLOW = "yellow"
+    RED = "red"
+
+
+class Product(Base):
+    """Tabela de produtos"""
+    __tablename__ = 'products'
+    
+    id = Column(Integer, primary_key=True)
+    key = Column(String(100), unique=True, nullable=False)
+    name_pt = Column(String(200), nullable=False)
+    name_it = Column(String(200), nullable=False)
+    name_en = Column(String(200))
+    
+    # Códigos aduaneiros
+    ncm_code = Column(String(8), nullable=False)
+    hs_code = Column(String(6), nullable=False)
+    taric_code = Column(String(10))
+    
+    # Características
+    direction = Column(SQLEnum(TradeDirectionDB), nullable=False)
+    state = Column(SQLEnum(ProductStateDB), nullable=False)
+    category = Column(String(50))
+    
+    # Parâmetros logísticos
+    shelf_life_days = Column(Integer)
+    transport_days_avg = Column(Integer)
+    temperature_min_c = Column(Float)
+    temperature_max_c = Column(Float)
+    
+    # Certificações
+    requires_phytosanitary_cert = Column(Boolean, default=True)
+    requires_health_cert = Column(Boolean, default=False)
+    requires_origin_cert = Column(Boolean, default=True)
+    
+    # Metadados
+    critical_substances = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relacionamentos
+    risk_assessments = relationship("RiskAssessment", back_populates="product")
+    lmr_data = relationship("LMRData", back_populates="product")
+
+
+class RiskAssessment(Base):
+    """Tabela de avaliações de risco"""
+    __tablename__ = 'risk_assessments'
+    
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
+    
+    # Scores
+    final_score = Column(Float, nullable=False)
+    status = Column(SQLEnum(RiskStatusDB), nullable=False)
+    
+    # Componentes
+    rasff_score = Column(Float)
+    lmr_score = Column(Float)
+    phyto_score = Column(Float)
+    logistic_score = Column(Float)
+    penalty = Column(Float)
+    
+    # Dados de entrada
+    rasff_alerts_6m = Column(Integer)
+    rasff_alerts_12m = Column(Integer)
+    
+    # Metadados
+    calculation_timestamp = Column(DateTime, default=datetime.utcnow)
+    recommendations = Column(JSON)
+    
+    # Relacionamentos
+    product = relationship("Product", back_populates="risk_assessments")
+
+
+class LMRData(Base):
+    """Tabela de dados de LMR (Limite Máximo de Resíduos)"""
+    __tablename__ = 'lmr_data'
+    
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
+    
+    substance = Column(String(200), nullable=False)
+    source_lmr = Column(Float)  # LMR do país de origem
+    dest_lmr = Column(Float)    # LMR do país de destino
+    detection_rate = Column(Float)
+    
+    source_authority = Column(String(50))  # ANVISA, EFSA, etc.
+    last_updated = Column(DateTime, default=datetime.utcnow)
+    
+    # Relacionamentos
+    product = relationship("Product", back_populates="lmr_data")
+
+
+class NotificationLog(Base):
+    """Log de notificações enviadas"""
+    __tablename__ = 'notification_logs'
+    
+    id = Column(Integer, primary_key=True)
+    user_email = Column(String(200), nullable=False)
+    product_key = Column(String(100), nullable=False)
+    risk_score = Column(Float)
+    notification_type = Column(String(50))  # email, webhook, sms
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    success = Column(Boolean, default=True)
+    error_message = Column(String(500))
+
+
+class User(Base):
+    """Tabela de usuários"""
+    __tablename__ = 'users'
+    
+    id = Column(Integer, primary_key=True)
+    email = Column(String(200), unique=True, nullable=False)
+    hashed_password = Column(String(200), nullable=False)
+    full_name = Column(String(200))
+    company = Column(String(200))
+    is_admin = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    
+    # Preferências de notificação
+    notification_threshold = Column(Float, default=65.0)
+    email_notifications = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# Database connection
+DATABASE_URL = "postgresql://zoi_user:IN3LI5N6OshhlVIDetxmCXhX01es3nK8@dpg-d5pkoeer433s73ddm970-a/zoi_db"
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DATABASE MODELS (CACHE ONLY - NO STATIC COMPLIANCE DATA)
-# ══════════════════════════════════════════════════════════════════════════════
 
-class Product(Base):
-    """Product Master Data (Basic Info Only)"""
-    __tablename__ = "products"
+def init_database():
+    """Inicializa banco de dados"""
+    Base.metadata.create_all(bind=engine)
+    print("[DB] ✓ Banco de dados inicializado")
+
+
+# ============================================================================
+# 3. FASTAPI REST API
+# ============================================================================
+
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr
+from typing import List, Optional
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import timedelta
+
+# Pydantic Models
+class ProductResponse(BaseModel):
+    id: int
+    key: str
+    name_pt: str
+    name_it: str
+    ncm_code: str
+    direction: str
+    state: str
+    shelf_life_days: int
     
-    id = Column(Integer, primary_key=True, index=True)
-    key = Column(String, unique=True, index=True, nullable=False)
-    name_pt = Column(String, nullable=False)
-    name_it = Column(String)
-    ncm_code = Column(String, nullable=False, index=True)
-    direction = Column(String)  # "export" or "import"
-    
-    # AI Cache (Living Intelligence Data)
-    ai_last_check = Column(DateTime, nullable=True)  # Last AI search timestamp
-    ai_raw_response = Column(JSON, nullable=True)  # Full AI response
-    ai_status = Column(String, nullable=True)  # "green", "yellow", "red"
-    ai_score = Column(Float, nullable=True)
-    ai_risk_factors = Column(JSON, nullable=True)
-    ai_compliance_alerts = Column(JSON, nullable=True)
-    ai_technical_specs = Column(JSON, nullable=True)
-    ai_barriers = Column(JSON, nullable=True)
-    ai_documents_required = Column(JSON, nullable=True)
-    ai_estimated_costs = Column(JSON, nullable=True)
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    class Config:
+        from_attributes = True
 
-Base.metadata.create_all(bind=engine)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MANUS AI / DYAD AGENT INTEGRATION
-# ══════════════════════════════════════════════════════════════════════════════
+class RiskCalculationRequest(BaseModel):
+    product_key: str
+    rasff_alerts_6m: int = 0
+    rasff_alerts_12m: int = 0
+    lmr_data: List[dict] = []
+    phyto_alerts: List[dict] = []
+    transport_days: Optional[int] = None
 
-class ManusAIResearchAgent:
-    """
-    🤖 MANUS AI RESEARCH AGENT - ZERO DATABASE APPROACH
-    
-    This agent replaces ALL static compliance tables.
-    It performs real-time research on:
-    - MAPA (SISCOLE/Vigiagro)
-    - ANVISA
-    - Siscomex
-    
-    Returns structured data for immediate use.
-    """
-    
-    def __init__(self):
-        # Try Manus AI first, fallback to Dyad
-        self.manus_api_key = os.environ.get('MANUS_API_KEY')
-        self.manus_api_url = os.environ.get(
-            'MANUS_API_URL', 
-            'https://api.manus.ai/v1/research'
-        )
-        
-        self.dyad_api_key = os.environ.get('DYAD_API_KEY')
-        self.dyad_api_url = os.environ.get(
-            'DYAD_API_URL',
-            'https://api.dyad.sh/v1/agents/run'
-        )
-        
-        if self.manus_api_key:
-            logger.info("✅ Manus AI configured - Using as primary research agent")
-            self.use_manus = True
-        elif self.dyad_api_key:
-            logger.info("✅ Dyad AI configured - Using as research agent")
-            self.use_manus = False
-        else:
-            logger.error("❌ NO AI AGENT CONFIGURED! System cannot operate.")
-            raise ValueError("MANUS_API_KEY or DYAD_API_KEY required for v4.0")
-    
-    def run_deep_search(
-        self,
-        product_name: str,
-        ncm_code: str,
-        direction: str,
-        origin_country: str = "Brasil",
-        destination_country: str = "Itália"
-    ) -> Optional[Dict[str, Any]]:
-        """
-        🔍 DEEP SEARCH - REAL-TIME COMPLIANCE RESEARCH
-        
-        This method performs live research on Brazilian regulatory portals
-        and returns structured compliance intelligence.
-        
-        Args:
-            product_name: Product name in Portuguese
-            ncm_code: 8-digit NCM code
-            direction: "export" or "import"
-            origin_country: Origin (default: Brasil)
-            destination_country: Destination (default: Itália)
-        
-        Returns:
-            Structured dict with all compliance data
-        """
-        
-        if not ncm_code or len(ncm_code) != 8:
-            logger.error(f"❌ Invalid NCM code: {ncm_code}")
-            return None
-        
-        try:
-            logger.info(f"\n{'━'*80}")
-            logger.info(f"🔍 DEEP SEARCH INITIATED - ZOI Sentinel v4.0")
-            logger.info(f"Product: {product_name}")
-            logger.info(f"NCM: {ncm_code}")
-            logger.info(f"Direction: {direction}")
-            logger.info(f"Route: {origin_country} → {destination_country}")
-            logger.info(f"Agent: {'Manus AI' if self.use_manus else 'Dyad AI'}")
-            logger.info(f"{'━'*80}\n")
-            
-            if self.use_manus:
-                return self._run_manus_search(
-                    product_name, ncm_code, direction,
-                    origin_country, destination_country
-                )
-            else:
-                return self._run_dyad_search(
-                    product_name, ncm_code, direction,
-                    origin_country, destination_country
-                )
-        
-        except Exception as e:
-            logger.error(f"❌ Deep Search Failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def _run_manus_search(
-        self, product_name, ncm_code, direction, origin, destination
-    ) -> Optional[Dict]:
-        """Execute Manus AI research"""
-        
-        prompt = f"""
-# TAREFA: Pesquisa de Compliance para Exportação Brasil → Itália
 
-## PRODUTO
-- Nome: {product_name}
-- NCM: {ncm_code}
-- Origem: {origin}
-- Destino: {destination}
-- Direção: {direction}
+class RiskCalculationResponse(BaseModel):
+    score: float
+    status: str
+    components: dict
+    recommendations: List[str]
+    product_info: dict
 
-## PORTAIS OBRIGATÓRIOS PARA CONSULTA
-1. **MAPA (Ministério da Agricultura)**
-   - SISCOLE (Sistema de Controle de Exportação)
-   - Vigiagro (Vigilância Agropecuária)
-   - URL: https://sistemasweb.agricultura.gov.br/
-   
-2. **ANVISA (Agência Nacional de Vigilância Sanitária)**
-   - Regularização de Alimentos
-   - URL: https://www.gov.br/anvisa/
-   
-3. **Siscomex (Sistema Integrado de Comércio Exterior)**
-   - Documentação de exportação
-   - URL: https://www.gov.br/siscomex/
 
-## ESTRUTURA DE RESPOSTA OBRIGATÓRIA (JSON)
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+    company: Optional[str] = None
 
-```json
-{{
-  "status": "green|yellow|red",
-  "score": 0-100,
-  "risk_factors": [
-    "Lista de fatores de risco identificados"
-  ],
-  "compliance_alerts": [
-    "Alertas regulatórios específicos"
-  ],
-  "technical_specs": [
-    "Especificações técnicas e LMRs"
-  ],
-  "barriers": {{
-    "sanitary": ["Barreiras sanitárias específicas"],
-    "phytosanitary": ["Barreiras fitossanitárias"],
-    "documentary": ["Documentos obrigatórios"]
-  }},
-  "documents_required": [
-    {{
-      "name": "Nome do documento",
-      "issuer": "Órgão emissor",
-      "validity": "Prazo de validade"
-    }}
-  ],
-  "estimated_costs": {{
-    "certifications": "R$ XXX",
-    "inspections": "R$ XXX",
-    "documentation": "R$ XXX",
-    "total_landing_cost_estimate": "R$ XXX"
-  }},
-  "sources": ["URLs consultadas"],
-  "last_updated": "ISO 8601 timestamp"
-}}
-```
 
-IMPORTANTE: Retorne APENAS o JSON, sem texto adicional.
-"""
-        
-        payload = {
-            "query": prompt,
-            "sources": [
-                "https://sistemasweb.agricultura.gov.br/",
-                "https://www.gov.br/anvisa/",
-                "https://www.gov.br/siscomex/"
-            ],
-            "max_tokens": 4000,
-            "temperature": 0.3
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {self.manus_api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        logger.info("📡 Sending request to Manus AI...")
-        start_time = datetime.now()
-        
-        response = requests.post(
-            self.manus_api_url,
-            json=payload,
-            headers=headers,
-            timeout=120
-        )
-        
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"⏱️ Manus AI response time: {elapsed:.1f}s")
-        
-        if response.status_code != 200:
-            logger.error(f"❌ Manus AI error: {response.status_code}")
-            logger.error(f"Response: {response.text}")
-            return None
-        
-        data = response.json()
-        
-        # Extract JSON from response
-        result_text = data.get('result', data.get('response', ''))
-        
-        # Try to extract JSON
-        try:
-            # Remove markdown code blocks if present
-            if '```json' in result_text:
-                result_text = result_text.split('```json')[1].split('```')[0]
-            elif '```' in result_text:
-                result_text = result_text.split('```')[1].split('```')[0]
-            
-            parsed = json.loads(result_text.strip())
-            logger.info("✅ Manus AI research completed successfully")
-            return parsed
-        
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Failed to parse Manus AI JSON: {e}")
-            logger.error(f"Raw response: {result_text[:500]}")
-            return None
-    
-    def _run_dyad_search(
-        self, product_name, ncm_code, direction, origin, destination
-    ) -> Optional[Dict]:
-        """Execute Dyad AI research (fallback)"""
-        
-        prompt = f"""
-Você é o agente de pesquisa de compliance do ZOI Sentinel v4.0.
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
-PRODUTO: {product_name}
-NCM: {ncm_code}
-ROTA: {origin} → {destination}
-DIREÇÃO: {direction}
 
-PORTAIS A CONSULTAR:
-1. MAPA/SISCOLE/Vigiagro
-2. ANVISA
-3. Siscomex
-
-Retorne um JSON com:
-- status (green/yellow/red)
-- score (0-100)
-- risk_factors (lista)
-- compliance_alerts (lista)
-- technical_specs (lista)
-- barriers (objeto com sanitary, phytosanitary, documentary)
-- documents_required (lista de objetos)
-- estimated_costs (objeto com certifications, inspections, documentation, total_landing_cost_estimate)
-- sources (URLs consultadas)
-- last_updated (timestamp)
-
-RETORNE APENAS O JSON, sem texto adicional.
-"""
-        
-        payload = {
-            "prompt": prompt,
-            "max_tokens": 4000,
-            "temperature": 0.3
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {self.dyad_api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        logger.info("📡 Sending request to Dyad AI...")
-        start_time = datetime.now()
-        
-        response = requests.post(
-            self.dyad_api_url,
-            json=payload,
-            headers=headers,
-            timeout=120
-        )
-        
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"⏱️ Dyad AI response time: {elapsed:.1f}s")
-        
-        if response.status_code != 200:
-            logger.error(f"❌ Dyad AI error: {response.status_code}")
-            return None
-        
-        data = response.json()
-        result_text = data.get('result', data.get('response', ''))
-        
-        try:
-            if '```json' in result_text:
-                result_text = result_text.split('```json')[1].split('```')[0]
-            elif '```' in result_text:
-                result_text = result_text.split('```')[1].split('```')[0]
-            
-            parsed = json.loads(result_text.strip())
-            logger.info("✅ Dyad AI research completed successfully")
-            return parsed
-        
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Failed to parse Dyad AI JSON: {e}")
-            return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CACHE MANAGER (24-HOUR STRATEGY)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class CacheManager:
-    """
-    ⏰ 24-HOUR CACHE STRATEGY
-    
-    Database serves ONLY as a 24-hour cache.
-    If data is older than 24 hours, MUST trigger new AI search.
-    """
-    
-    @staticmethod
-    def is_cache_valid(product: Product) -> bool:
-        """Check if cached AI data is still valid (< 24 hours)"""
-        
-        if not product.ai_last_check:
-            logger.info(f"❌ No cached data for {product.key}")
-            return False
-        
-        age = datetime.utcnow() - product.ai_last_check
-        valid = age < timedelta(hours=24)
-        
-        if valid:
-            logger.info(f"✅ Cache valid for {product.key} (age: {age.total_seconds()/3600:.1f}h)")
-        else:
-            logger.info(f"⏰ Cache expired for {product.key} (age: {age.total_seconds()/3600:.1f}h)")
-        
-        return valid
-    
-    @staticmethod
-    def save_ai_results(product: Product, ai_data: Dict, db) -> None:
-        """Save AI research results to cache"""
-        
-        try:
-            product.ai_last_check = datetime.utcnow()
-            product.ai_raw_response = ai_data
-            product.ai_status = ai_data.get('status', 'yellow')
-            product.ai_score = ai_data.get('score', 50.0)
-            product.ai_risk_factors = ai_data.get('risk_factors', [])
-            product.ai_compliance_alerts = ai_data.get('compliance_alerts', [])
-            product.ai_technical_specs = ai_data.get('technical_specs', [])
-            product.ai_barriers = ai_data.get('barriers', {})
-            product.ai_documents_required = ai_data.get('documents_required', [])
-            product.ai_estimated_costs = ai_data.get('estimated_costs', {})
-            
-            db.commit()
-            logger.info(f"💾 AI results cached for {product.key}")
-        
-        except Exception as e:
-            logger.error(f"❌ Failed to save cache: {e}")
-            db.rollback()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PDF GENERATOR - BUSINESS CLASS DESIGN
-# ══════════════════════════════════════════════════════════════════════════════
-
-class BusinessClassPDFGenerator:
-    """
-    📄 PREMIUM PDF REPORT GENERATOR
-    
-    Business-class design with:
-    - Professional header
-    - Real-time verification seal
-    - Clean tables and sections
-    - Executive summary format
-    """
-    
-    def __init__(self):
-        self.pagesize = A4
-        self.width, self.height = self.pagesize
-    
-    def _add_header(self, canvas_obj, doc):
-        """Add professional header to each page"""
-        canvas_obj.saveState()
-        
-        # Header background
-        canvas_obj.setFillColorRGB(0.1, 0.2, 0.35)  # Dark blue
-        canvas_obj.rect(0, self.height - 2*cm, self.width, 2*cm, fill=True, stroke=False)
-        
-        # ZOI Logo text
-        canvas_obj.setFillColorRGB(1, 1, 1)  # White
-        canvas_obj.setFont("Helvetica-Bold", 20)
-        canvas_obj.drawString(2*cm, self.height - 1.3*cm, "ZOI")
-        
-        canvas_obj.setFont("Helvetica", 10)
-        canvas_obj.drawString(2*cm, self.height - 1.7*cm, "Strategic Advisory")
-        
-        # Document title
-        canvas_obj.setFont("Helvetica-Bold", 14)
-        canvas_obj.drawRightString(
-            self.width - 2*cm,
-            self.height - 1.5*cm,
-            "Dossier de Inteligência de Mercado"
-        )
-        
-        canvas_obj.restoreState()
-    
-    def _add_footer(self, canvas_obj, doc):
-        """Add footer with page numbers"""
-        canvas_obj.saveState()
-        
-        canvas_obj.setFont("Helvetica", 8)
-        canvas_obj.setFillColorRGB(0.5, 0.5, 0.5)
-        
-        footer_text = f"ZOI Sentinel © {datetime.now().year} | Página {doc.page}"
-        canvas_obj.drawCentredString(
-            self.width / 2,
-            1*cm,
-            footer_text
-        )
-        
-        canvas_obj.restoreState()
-    
-    def generate_dossier(
-        self,
-        product_data: Dict,
-        ai_data: Dict,
-        verification_time: datetime
-    ) -> BytesIO:
-        """
-        Generate premium PDF dossier
-        
-        Args:
-            product_data: Product information
-            ai_data: AI research results
-            verification_time: Timestamp of AI verification
-        
-        Returns:
-            BytesIO buffer with PDF
-        """
-        
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=self.pagesize,
-            rightMargin=2*cm,
-            leftMargin=2*cm,
-            topMargin=3*cm,
-            bottomMargin=2.5*cm
-        )
-        
-        # Story (PDF content)
-        story = []
-        
-        # Styles
-        styles = getSampleStyleSheet()
-        
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=24,
-            textColor=colors.HexColor('#1a3352'),
-            spaceAfter=30,
-            alignment=TA_CENTER,
-            fontName='Helvetica-Bold'
-        )
-        
-        heading_style = ParagraphStyle(
-            'CustomHeading',
-            parent=styles['Heading2'],
-            fontSize=14,
-            textColor=colors.HexColor('#1a3352'),
-            spaceAfter=12,
-            spaceBefore=20,
-            fontName='Helvetica-Bold'
-        )
-        
-        body_style = ParagraphStyle(
-            'CustomBody',
-            parent=styles['BodyText'],
-            fontSize=10,
-            leading=14,
-            alignment=TA_JUSTIFY
-        )
-        
-        # ═══════════════════════════════════════════════════════════════
-        # COVER PAGE
-        # ═══════════════════════════════════════════════════════════════
-        
-        # Title
-        story.append(Spacer(1, 1*cm))
-        story.append(Paragraph(
-            "Dossier de Inteligência de Mercado",
-            title_style
-        ))
-        
-        # Verification Seal
-        seal_style = ParagraphStyle(
-            'Seal',
-            parent=body_style,
-            fontSize=11,
-            textColor=colors.HexColor('#d97706'),
-            alignment=TA_CENTER,
-            fontName='Helvetica-Bold'
-        )
-        
-        verification_text = f"""
-        ⚠️ VERIFICADO EM TEMPO REAL VIA AGENTE IA<br/>
-        {verification_time.strftime('%d/%m/%Y às %H:%M:%S')} UTC
-        """
-        
-        story.append(Spacer(1, 0.5*cm))
-        story.append(Paragraph(verification_text, seal_style))
-        story.append(Spacer(1, 1*cm))
-        
-        # Product Information Box
-        product_info_data = [
-            ['PRODUTO', product_data.get('name_pt', 'N/A')],
-            ['NOME ITALIANO', product_data.get('name_it', 'N/A')],
-            ['CÓDIGO NCM', product_data.get('ncm_code', 'N/A')],
-            ['DIREÇÃO', product_data.get('direction', 'N/A').upper()],
-        ]
-        
-        product_table = Table(product_info_data, colWidths=[6*cm, 10*cm])
-        product_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#1a3352')),
-            ('TEXTCOLOR', (0, 0), (0, -1), colors.whitesmoke),
-            ('BACKGROUND', (1, 0), (1, -1), colors.HexColor('#f3f4f6')),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('PADDING', (0, 0), (-1, -1), 12),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ]))
-        
-        story.append(product_table)
-        story.append(Spacer(1, 1*cm))
-        
-        # Risk Score (Big Number)
-        score = ai_data.get('score', 50)
-        status = ai_data.get('status', 'yellow')
-        
-        status_colors = {
-            'green': colors.HexColor('#10b981'),
-            'yellow': colors.HexColor('#f59e0b'),
-            'red': colors.HexColor('#ef4444')
-        }
-        
-        score_style = ParagraphStyle(
-            'Score',
-            parent=body_style,
-            fontSize=48,
-            textColor=status_colors.get(status, colors.grey),
-            alignment=TA_CENTER,
-            fontName='Helvetica-Bold'
-        )
-        
-        story.append(Paragraph(f"{score:.1f}", score_style))
-        
-        score_label_style = ParagraphStyle(
-            'ScoreLabel',
-            parent=body_style,
-            fontSize=12,
-            alignment=TA_CENTER,
-            textColor=colors.grey
-        )
-        
-        status_labels = {
-            'green': 'BAIXO RISCO',
-            'yellow': 'RISCO MODERADO',
-            'red': 'ALTO RISCO'
-        }
-        
-        story.append(Paragraph(
-            status_labels.get(status, 'RISCO MODERADO'),
-            score_label_style
-        ))
-        
-        story.append(PageBreak())
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SECTION 1: FATORES DE RISCO
-        # ═══════════════════════════════════════════════════════════════
-        
-        story.append(Paragraph("1. Fatores de Risco Identificados", heading_style))
-        story.append(Spacer(1, 0.3*cm))
-        
-        risk_factors = ai_data.get('risk_factors', [])
-        
-        if risk_factors:
-            for i, factor in enumerate(risk_factors, 1):
-                story.append(Paragraph(f"• {factor}", body_style))
-                story.append(Spacer(1, 0.2*cm))
-        else:
-            story.append(Paragraph(
-                "Nenhum fator de risco crítico identificado.",
-                body_style
-            ))
-        
-        story.append(Spacer(1, 0.5*cm))
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SECTION 2: BARREIRAS SANITÁRIAS E FITOSSANITÁRIAS
-        # ═══════════════════════════════════════════════════════════════
-        
-        story.append(Paragraph("2. Barreiras Sanitárias e Fitossanitárias", heading_style))
-        story.append(Spacer(1, 0.3*cm))
-        
-        barriers = ai_data.get('barriers', {})
-        
-        # Sanitary Barriers
-        if barriers.get('sanitary'):
-            story.append(Paragraph("<b>Barreiras Sanitárias:</b>", body_style))
-            for barrier in barriers['sanitary']:
-                story.append(Paragraph(f"• {barrier}", body_style))
-            story.append(Spacer(1, 0.3*cm))
-        
-        # Phytosanitary Barriers
-        if barriers.get('phytosanitary'):
-            story.append(Paragraph("<b>Barreiras Fitossanitárias:</b>", body_style))
-            for barrier in barriers['phytosanitary']:
-                story.append(Paragraph(f"• {barrier}", body_style))
-            story.append(Spacer(1, 0.3*cm))
-        
-        # Documentary Requirements
-        if barriers.get('documentary'):
-            story.append(Paragraph("<b>Requisitos Documentais:</b>", body_style))
-            for req in barriers['documentary']:
-                story.append(Paragraph(f"• {req}", body_style))
-            story.append(Spacer(1, 0.3*cm))
-        
-        story.append(Spacer(1, 0.5*cm))
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SECTION 3: DOCUMENTAÇÃO OBRIGATÓRIA
-        # ═══════════════════════════════════════════════════════════════
-        
-        story.append(Paragraph("3. Documentação Obrigatória", heading_style))
-        story.append(Spacer(1, 0.3*cm))
-        
-        documents = ai_data.get('documents_required', [])
-        
-        if documents:
-            doc_data = [['Documento', 'Órgão Emissor', 'Validade']]
-            
-            for doc in documents:
-                doc_data.append([
-                    doc.get('name', 'N/A'),
-                    doc.get('issuer', 'N/A'),
-                    doc.get('validity', 'N/A')
-                ])
-            
-            doc_table = Table(doc_data, colWidths=[6*cm, 6*cm, 4*cm])
-            doc_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a3352')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f9fafb')),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('PADDING', (0, 0), (-1, -1), 8),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ]))
-            
-            story.append(doc_table)
-        else:
-            story.append(Paragraph(
-                "Informação não disponível no momento.",
-                body_style
-            ))
-        
-        story.append(Spacer(1, 0.5*cm))
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SECTION 4: CUSTOS ESTIMADOS (LANDING COST)
-        # ═══════════════════════════════════════════════════════════════
-        
-        story.append(Paragraph("4. Custos Estimados (Landing Cost)", heading_style))
-        story.append(Spacer(1, 0.3*cm))
-        
-        costs = ai_data.get('estimated_costs', {})
-        
-        if costs:
-            cost_data = [['Item', 'Valor Estimado']]
-            
-            cost_items = {
-                'certifications': 'Certificações',
-                'inspections': 'Inspeções',
-                'documentation': 'Documentação',
-                'total_landing_cost_estimate': 'TOTAL ESTIMADO'
-            }
-            
-            for key, label in cost_items.items():
-                value = costs.get(key, 'N/A')
-                if key == 'total_landing_cost_estimate':
-                    cost_data.append([f"<b>{label}</b>", f"<b>{value}</b>"])
-                else:
-                    cost_data.append([label, value])
-            
-            cost_table = Table(cost_data, colWidths=[10*cm, 6*cm])
-            cost_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a3352')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('BACKGROUND', (0, 1), (-1, -2), colors.HexColor('#f9fafb')),
-                ('BACKGROUND', (0, -1), (-1, -1), colors.HexColor('#fef3c7')),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('PADDING', (0, 0), (-1, -1), 10),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ]))
-            
-            story.append(cost_table)
-        else:
-            story.append(Paragraph(
-                "Estimativa de custos não disponível.",
-                body_style
-            ))
-        
-        story.append(Spacer(1, 0.5*cm))
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SECTION 5: ALERTAS DE COMPLIANCE
-        # ═══════════════════════════════════════════════════════════════
-        
-        story.append(Paragraph("5. Alertas de Compliance", heading_style))
-        story.append(Spacer(1, 0.3*cm))
-        
-        alerts = ai_data.get('compliance_alerts', [])
-        
-        if alerts:
-            for alert in alerts:
-                story.append(Paragraph(f"⚠️ {alert}", body_style))
-                story.append(Spacer(1, 0.2*cm))
-        else:
-            story.append(Paragraph(
-                "Nenhum alerta crítico no momento.",
-                body_style
-            ))
-        
-        story.append(Spacer(1, 0.5*cm))
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SECTION 6: ESPECIFICAÇÕES TÉCNICAS
-        # ═══════════════════════════════════════════════════════════════
-        
-        story.append(Paragraph("6. Especificações Técnicas", heading_style))
-        story.append(Spacer(1, 0.3*cm))
-        
-        specs = ai_data.get('technical_specs', [])
-        
-        if specs:
-            for spec in specs:
-                story.append(Paragraph(f"• {spec}", body_style))
-                story.append(Spacer(1, 0.2*cm))
-        else:
-            story.append(Paragraph(
-                "Especificações técnicas não disponíveis.",
-                body_style
-            ))
-        
-        # ═══════════════════════════════════════════════════════════════
-        # FOOTER / DISCLAIMER
-        # ═══════════════════════════════════════════════════════════════
-        
-        story.append(PageBreak())
-        
-        disclaimer_style = ParagraphStyle(
-            'Disclaimer',
-            parent=body_style,
-            fontSize=8,
-            textColor=colors.grey,
-            alignment=TA_JUSTIFY
-        )
-        
-        disclaimer_text = f"""
-        <b>AVISO LEGAL</b><br/><br/>
-        Este dossier foi gerado em {verification_time.strftime('%d/%m/%Y às %H:%M:%S')} UTC 
-        por meio de pesquisa em tempo real realizada por Agente de Inteligência Artificial nos 
-        principais portais regulatórios brasileiros (MAPA, ANVISA, Siscomex).<br/><br/>
-        
-        As informações aqui contidas refletem o estado regulatório vigente no momento da consulta 
-        e devem ser utilizadas como referência estratégica. Recomenda-se verificação adicional 
-        junto aos órgãos competentes antes de decisões comerciais definitivas.<br/><br/>
-        
-        <b>ZOI Strategic Advisory</b> | Sistema ZOI Sentinel v4.0 - Living Intelligence Architecture
-        """
-        
-        story.append(Paragraph(disclaimer_text, disclaimer_style))
-        
-        # Build PDF
-        doc.build(
-            story,
-            onFirstPage=self._add_header,
-            onLaterPages=self._add_header
-        )
-        
-        buffer.seek(0)
-        return buffer
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FASTAPI APPLICATION
-# ══════════════════════════════════════════════════════════════════════════════
-
+# FastAPI App
 app = FastAPI(
-    title="ZOI Sentinel v4.0",
-    description="Living Intelligence System - Zero Database Architecture",
-    version="4.0.0"
+    title="ZOI Trade Advisory API",
+    description="Sistema Bilateral de Compliance Sanitária e Fitossanitária",
+    version="2.0.0"
 )
+
+# CORS
+from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://lovable.app",
+        "https://*.lovable.app",
+        "https://*.lovableproject.com",
+        "*" # Temporário para teste de estresse
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
-# Dependency
+# Security
+SECRET_KEY = "your-secret-key-change-in-production"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+# Helper Functions
 def get_db():
     db = SessionLocal()
     try:
@@ -919,308 +416,967 @@ def get_db():
     finally:
         db.close()
 
-# Initialize AI Agent
-try:
-    ai_agent = ManusAIResearchAgent()
-except ValueError as e:
-    logger.error(f"Failed to initialize AI agent: {e}")
-    ai_agent = None
 
-# ══════════════════════════════════════════════════════════════════════════════
-# API ENDPOINTS
-# ══════════════════════════════════════════════════════════════════════════════
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+# API Endpoints
 @app.get("/")
 def root():
-    """System status"""
     return {
-        "service": "ZOI Sentinel",
-        "version": "4.0.0",
-        "architecture": "Zero Database - Living Intelligence",
+        "message": "ZOI Trade Advisory API v2.0",
         "status": "operational",
-        "ai_agent": "Manus AI" if ai_agent and ai_agent.use_manus else "Dyad AI",
-        "cache_strategy": "24 hours",
-        "features": [
-            "🧠 Real-Time AI Research",
-            "📡 Zero Static Compliance Tables",
-            "🎯 24-Hour Cache Only",
-            "📄 Business Class PDF Reports",
-            "⚡ Async/Await PDF Generation"
-        ]
+        "endpoints": {
+            "products": "/api/products",
+            "risk_calculation": "/api/calculate-risk",
+            "admin": "/api/admin"
+        }
     }
 
-@app.get("/api/products/{product_key}")
-def get_product_intelligence(product_key: str, db: SessionLocal = Depends(get_db)):
-    """
-    Get product compliance intelligence
+
+@app.get("/api/products", response_model=List[ProductResponse])
+def get_products(
+    direction: Optional[str] = None,
+    state: Optional[str] = None,
+    db: SessionLocal = Depends(get_db)
+):
+    """Lista produtos com filtros opcionais"""
     
-    LOGIC:
-    1. Check cache (< 24h)
-    2. If valid: Return cached data
-    3. If invalid: Launch AI research → Wait → Save → Return
-    """
+    query = db.query(Product)
     
-    logger.info(f"\n{'━'*80}")
-    logger.info(f"🔍 PRODUCT INTELLIGENCE REQUEST: {product_key}")
-    logger.info(f"{'━'*80}")
+    if direction:
+        query = query.filter(Product.direction == direction)
     
-    # Find product
+    if state:
+        query = query.filter(Product.state == state)
+    
+    products = query.all()
+    
+    return products
+
+
+@app.get("/api/products/{product_key}", response_model=ProductResponse)
+def get_product(product_key: str, db: SessionLocal = Depends(get_db)):
+    """Retorna detalhes de um produto específico"""
+    
     product = db.query(Product).filter(Product.key == product_key).first()
     
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     
-    # Check cache validity
-    cache_valid = CacheManager.is_cache_valid(product)
+    return product
+
+
+@app.post("/api/calculate-risk", response_model=RiskCalculationResponse)
+def calculate_risk(
+    request: RiskCalculationRequest,
+    background_tasks: BackgroundTasks,
+    db: SessionLocal = Depends(get_db)
+):
+    """
+    Calcula Risk Score para um produto
+    """
     
-    if cache_valid:
-        logger.info("✅ Returning cached data")
+    # Buscar produto
+    product = db.query(Product).filter(Product.key == request.product_key).first()
+    
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    # Importar motor de risco (assumindo que está no mesmo arquivo)
+    from zoi_bilateral_system import SentinelScore2Engine, ProductSpec, TradeDirection, ProductState
+    
+    # Converter para ProductSpec
+    product_spec = ProductSpec(
+        name_pt=product.name_pt,
+        name_it=product.name_it,
+        name_en=product.name_en or "",
+        ncm_code=product.ncm_code,
+        hs_code=product.hs_code,
+        taric_code=product.taric_code,
+        state=ProductState(product.state.value),
+        shelf_life_days=product.shelf_life_days,
+        transport_days_avg=product.transport_days_avg,
+        temperature_min_c=product.temperature_min_c,
+        temperature_max_c=product.temperature_max_c,
+        requires_phytosanitary_cert=product.requires_phytosanitary_cert,
+        requires_health_cert=product.requires_health_cert,
+        critical_substances=product.critical_substances or []
+    )
+    
+    # Calcular risco
+    engine = SentinelScore2Engine(TradeDirection(product.direction.value))
+    
+    result = engine.calculate_risk_score(
+        product=product_spec,
+        rasff_data={
+            'alerts_6m': request.rasff_alerts_6m,
+            'alerts_12m': request.rasff_alerts_12m
+        },
+        lmr_data=request.lmr_data,
+        phyto_data={'alerts': request.phyto_alerts},
+        transport_data={'days': request.transport_days or product.transport_days_avg}
+    )
+    
+    # Salvar avaliação no banco
+    assessment = RiskAssessment(
+        product_id=product.id,
+        final_score=result['score'],
+        status=RiskStatusDB(result['status']),
+        rasff_score=result['components']['rasff_score'],
+        lmr_score=result['components']['lmr_score'],
+        phyto_score=result['components']['phyto_score'],
+        logistic_score=result['components']['logistic_score'],
+        penalty=result['components']['penalty'],
+        rasff_alerts_6m=request.rasff_alerts_6m,
+        rasff_alerts_12m=request.rasff_alerts_12m,
+        recommendations=result['recommendations']
+    )
+    
+    db.add(assessment)
+    db.commit()
+    
+    # Enviar notificações em background se score > threshold
+    if result['score'] > 65:
+        background_tasks.add_task(
+            send_risk_notifications,
+            product_key=request.product_key,
+            score=result['score'],
+            status=result['status']
+        )
+    
+    return result
+
+
+@app.post("/api/users", status_code=status.HTTP_201_CREATED)
+def create_user(user: UserCreate, db: SessionLocal = Depends(get_db)):
+    """Cria novo usuário"""
+    
+    # Verificar se email já existe
+    existing_user = db.query(User).filter(User.email == user.email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Criar usuário
+    db_user = User(
+        email=user.email,
+        hashed_password=get_password_hash(user.password),
+        full_name=user.full_name,
+        company=user.company
+    )
+    
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    return {"message": "User created successfully", "email": db_user.email}
+
+
+@app.post("/token", response_model=Token)
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: SessionLocal = Depends(get_db)
+):
+    """Login endpoint"""
+    
+    user = db.query(User).filter(User.email == form_data.username).first()
+    
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/api/admin/stats")
+def get_admin_stats(db: SessionLocal = Depends(get_db)):
+    """Estatísticas do sistema (admin apenas)"""
+    
+    total_products = db.query(Product).count()
+    total_assessments = db.query(RiskAssessment).count()
+    total_users = db.query(User).count()
+    
+    # Distribuição de status
+    green_count = db.query(RiskAssessment).filter(RiskAssessment.status == RiskStatusDB.GREEN).count()
+    yellow_count = db.query(RiskAssessment).filter(RiskAssessment.status == RiskStatusDB.YELLOW).count()
+    red_count = db.query(RiskAssessment).filter(RiskAssessment.status == RiskStatusDB.RED).count()
+    
+    return {
+        "total_products": total_products,
+        "total_assessments": total_assessments,
+        "total_users": total_users,
+        "status_distribution": {
+            "green": green_count,
+            "yellow": yellow_count,
+            "red": red_count
+        }
+    }
+
+
+# ============================================================================
+# 4. NOTIFICATION SYSTEM
+# ============================================================================
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+
+class NotificationService:
+    """Serviço de notificações (Email + Webhooks)"""
+    
+    # Configuração SMTP (usar variáveis de ambiente em produção)
+    SMTP_SERVER = "smtp.sendgrid.net"
+    SMTP_PORT = 587
+    SMTP_USER = "apikey"
+    SMTP_PASSWORD = "your-sendgrid-api-key"
+    FROM_EMAIL = "alerts@zoi-trade.com"
+    
+    @classmethod
+    def send_email(cls, to_email: str, subject: str, html_content: str) -> bool:
+        """Envia email via SMTP"""
+        
+        try:
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = cls.FROM_EMAIL
+            msg['To'] = to_email
+            
+            html_part = MIMEText(html_content, 'html')
+            msg.attach(html_part)
+            
+            with smtplib.SMTP(cls.SMTP_SERVER, cls.SMTP_PORT) as server:
+                server.starttls()
+                server.login(cls.SMTP_USER, cls.SMTP_PASSWORD)
+                server.send_message(msg)
+            
+            print(f"[EMAIL] ✓ Enviado para {to_email}")
+            return True
+            
+        except Exception as e:
+            print(f"[EMAIL] ✗ Erro ao enviar para {to_email}: {e}")
+            return False
+    
+    @classmethod
+    def send_risk_alert(cls, user_email: str, product_name: str, score: float, status: str):
+        """Envia alerta de risco alto"""
+        
+        status_emoji = "🛑" if status == "red" else "⚠️"
+        
+        subject = f"{status_emoji} ZOI Alert: {product_name} - Risk Score {score}"
+        
+        html_content = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #1e40af;">ZOI Trade Advisory Alert</h2>
+                
+                <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
+                    <h3 style="margin-top: 0;">{status_emoji} High Risk Detected</h3>
+                    <p><strong>Product:</strong> {product_name}</p>
+                    <p><strong>Risk Score:</strong> {score}/100</p>
+                    <p><strong>Status:</strong> {status.upper()}</p>
+                </div>
+                
+                <p>Our system has detected elevated compliance risks for this shipment.</p>
+                
+                <p><strong>Recommended Actions:</strong></p>
+                <ul>
+                    <li>Review laboratory analysis reports</li>
+                    <li>Verify certification documents</li>
+                    <li>Consider alternative suppliers or routes</li>
+                </ul>
+                
+                <p style="margin-top: 30px; color: #6b7280;">
+                    <small>This is an automated alert from ZOI Sentinel System</small>
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return cls.send_email(user_email, subject, html_content)
+
+
+def send_risk_notifications(product_key: str, score: float, status: str):
+    """
+    Função para enviar notificações (chamada em background)
+    """
+    
+    db = SessionLocal()
+    
+    try:
+        # Buscar produto
+        product = db.query(Product).filter(Product.key == product_key).first()
+        
+        if not product:
+            return
+        
+        # Buscar usuários que querem notificações
+        users = db.query(User).filter(
+            User.email_notifications == True,
+            User.notification_threshold <= score
+        ).all()
+        
+        for user in users:
+            # Enviar email
+            success = NotificationService.send_risk_alert(
+                user_email=user.email,
+                product_name=product.name_pt,
+                score=score,
+                status=status
+            )
+            
+            # Registrar log
+            log = NotificationLog(
+                user_email=user.email,
+                product_key=product_key,
+                risk_score=score,
+                notification_type="email",
+                success=success,
+                error_message=None if success else "SMTP error"
+            )
+            db.add(log)
+        
+        db.commit()
+        
+    finally:
+        db.close()
+
+
+# ============================================================================
+# 5. ADMIN DASHBOARD (CLI + Web Interface Básica)
+# ============================================================================
+
+import click
+
+
+@click.group()
+def cli():
+    """ZOI Admin CLI"""
+    pass
+
+
+@cli.command()
+def init_db():
+    """Inicializa banco de dados"""
+    init_database()
+    click.echo("✓ Database initialized")
+
+
+@cli.command()
+@click.option('--direction', type=click.Choice(['export', 'import']))
+def seed_products(direction):
+    """Popula banco com produtos padrão"""
+    
+    from zoi_bilateral_system import ProductDatabase, TradeDirection
+    
+    db = SessionLocal()
+    
+    trade_dir = TradeDirection.BR_TO_IT if direction == 'export' else TradeDirection.IT_TO_BR
+    products_dict = ProductDatabase.get_all_products(trade_dir)
+    
+    for key, spec in products_dict.items():
+        existing = db.query(Product).filter(Product.key == key).first()
+        
+        if existing:
+            click.echo(f"⊘ {key} já existe")
+            continue
+        
+        product = Product(
+            key=key,
+            name_pt=spec.name_pt,
+            name_it=spec.name_it,
+            name_en=spec.name_en,
+            ncm_code=spec.ncm_code,
+            hs_code=spec.hs_code,
+            taric_code=spec.taric_code,
+            direction=TradeDirectionDB(direction),
+            state=ProductStateDB(spec.state.value),
+            shelf_life_days=spec.shelf_life_days,
+            transport_days_avg=spec.transport_days_avg,
+            temperature_min_c=spec.temperature_min_c,
+            temperature_max_c=spec.temperature_max_c,
+            requires_phytosanitary_cert=spec.requires_phytosanitary_cert,
+            requires_health_cert=spec.requires_health_cert,
+            critical_substances=spec.critical_substances
+        )
+        
+        db.add(product)
+        click.echo(f"✓ {key} adicionado")
+    
+    db.commit()
+    db.close()
+    
+    click.echo(f"\n✓ {len(products_dict)} produtos importados")
+
+
+@cli.command()
+def collect_anvisa_data():
+    """Coleta dados de LMR da ANVISA"""
+    
+    scraper = ANVISAScraper()
+    
+    substances = ['Glifosato', 'Carbendazim', 'Clorpirifós', 'Tiabendazol']
+    crops = ['Soja', 'Café', 'Laranja', 'Manga']
+    
+    click.echo("[ANVISA] Iniciando coleta...")
+    
+    results = scraper.batch_collect(substances, crops)
+    
+    # Salvar em arquivo JSON
+    output_path = Path("data/anvisa_lmr_data.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    
+    click.echo(f"✓ {len(results)} registros coletados")
+    click.echo(f"✓ Dados salvos em {output_path}")
+
+
+@cli.command()
+@click.option('--email', prompt=True)
+@click.option('--password', prompt=True, hide_input=True)
+@click.option('--name', prompt=True)
+def create_admin(email, password, name):
+    """Cria usuário administrador"""
+    
+    db = SessionLocal()
+    
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        click.echo("✗ Email já cadastrado")
+        return
+    
+    user = User(
+        email=email,
+        hashed_password=get_password_hash(password),
+        full_name=name,
+        is_admin=True,
+        is_active=True
+    )
+    
+    db.add(user)
+    db.commit()
+    
+    click.echo(f"✓ Admin criado: {email}")
+    db.close()
+
+
+@cli.command()
+def stats():
+    """Exibe estatísticas do sistema"""
+    
+    db = SessionLocal()
+    
+    total_products = db.query(Product).count()
+    total_assessments = db.query(RiskAssessment).count()
+    total_users = db.query(User).count()
+    
+    # Últimas avaliações
+    recent = db.query(RiskAssessment).order_by(RiskAssessment.calculation_timestamp.desc()).limit(5).all()
+    
+    click.echo("\n" + "="*60)
+    click.echo("ZOI SYSTEM STATISTICS")
+    click.echo("="*60)
+    click.echo(f"\nProducts: {total_products}")
+    click.echo(f"Risk Assessments: {total_assessments}")
+    click.echo(f"Registered Users: {total_users}")
+    
+    if recent:
+        click.echo("\n" + "-"*60)
+        click.echo("RECENT ASSESSMENTS")
+        click.echo("-"*60)
+        
+        for assessment in recent:
+            product = db.query(Product).filter(Product.id == assessment.product_id).first()
+            click.echo(f"\n{assessment.calculation_timestamp.strftime('%Y-%m-%d %H:%M')}")
+            click.echo(f"  Product: {product.name_pt if product else 'Unknown'}")
+            click.echo(f"  Score: {assessment.final_score} ({assessment.status.value})")
+    
+    click.echo("\n" + "="*60 + "\n")
+    db.close()
+
+
+# ============================================================================
+# 6. SCHEDULED TASKS (Data Collection Automation)
+# ============================================================================
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+
+class ScheduledTasks:
+    """Tarefas agendadas para coleta automática de dados"""
+    
+    def __init__(self):
+        self.scheduler = BackgroundScheduler()
+    
+    def start(self):
+        """Inicia scheduler"""
+        
+        # Coletar RASFF toda segunda-feira às 8h
+        self.scheduler.add_job(
+            self.collect_rasff_data,
+            CronTrigger(day_of_week='mon', hour=8, minute=0),
+            id='rasff_collection',
+            name='RASFF Data Collection'
+        )
+        
+        # Coletar ANVISA toda sexta-feira às 18h
+        self.scheduler.add_job(
+            self.collect_anvisa_data,
+            CronTrigger(day_of_week='fri', hour=18, minute=0),
+            id='anvisa_collection',
+            name='ANVISA Data Collection'
+        )
+        
+        # Recalcular riscos todo dia às 6h
+        self.scheduler.add_job(
+            self.recalculate_all_risks,
+            CronTrigger(hour=6, minute=0),
+            id='risk_recalculation',
+            name='Daily Risk Recalculation'
+        )
+        
+        self.scheduler.start()
+        print("[SCHEDULER] ✓ Tarefas agendadas iniciadas")
+    
+    @staticmethod
+    def collect_rasff_data():
+        """Coleta dados RASFF automaticamente"""
+        print("[SCHEDULER] Iniciando coleta RASFF...")
+        
+        try:
+            from zoi_collector import RASFFScraper, BrowserManager
+            
+            driver = BrowserManager.create_driver(headless=True)
+            scraper = RASFFScraper(driver)
+            
+            alerts = scraper.search_brazil_alerts(days_back=30)
+            
+            # Salvar em arquivo
+            output_path = Path("data/scheduled/rasff_alerts.json")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'collected_at': datetime.utcnow().isoformat(),
+                    'alerts': alerts
+                }, f, indent=2, ensure_ascii=False)
+            
+            driver.quit()
+            
+            print(f"[SCHEDULER] ✓ {len(alerts)} alertas RASFF coletados")
+            
+        except Exception as e:
+            print(f"[SCHEDULER] ✗ Erro na coleta RASFF: {e}")
+    
+    @staticmethod
+    def collect_anvisa_data():
+        """Coleta dados ANVISA automaticamente"""
+        print("[SCHEDULER] Iniciando coleta ANVISA...")
+        
+        try:
+            scraper = ANVISAScraper()
+            
+            substances = ['Glifosato', 'Carbendazim', 'Clorpirifós']
+            crops = ['Soja', 'Café', 'Laranja']
+            
+            results = scraper.batch_collect(substances, crops)
+            
+            # Salvar
+            output_path = Path("data/scheduled/anvisa_lmr.json")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'collected_at': datetime.utcnow().isoformat(),
+                    'lmr_data': results
+                }, f, indent=2, ensure_ascii=False)
+            
+            print(f"[SCHEDULER] ✓ {len(results)} LMRs ANVISA coletados")
+            
+        except Exception as e:
+            print(f"[SCHEDULER] ✗ Erro na coleta ANVISA: {e}")
+    
+    @staticmethod
+    def recalculate_all_risks():
+        """Recalcula riscos para todos os produtos"""
+        print("[SCHEDULER] Recalculando riscos...")
+        
+        db = SessionLocal()
+        
+        try:
+            products = db.query(Product).all()
+            
+            for product in products:
+                # Buscar dados mais recentes
+                rasff_file = Path("data/scheduled/rasff_alerts.json")
+                
+                if rasff_file.exists():
+                    with open(rasff_file, 'r') as f:
+                        rasff_data_full = json.load(f)
+                    
+                    # Filtrar alertas para este produto
+                    product_alerts = [
+                        a for a in rasff_data_full.get('alerts', [])
+                        if product.name_pt.lower() in a.get('product', '').lower()
+                    ]
+                    
+                    alerts_6m = len([a for a in product_alerts[:6]])
+                    alerts_12m = len(product_alerts[:12])
+                    
+                    # Calcular risco (simplificado)
+                    from zoi_bilateral_system import SentinelScore2Engine, ProductSpec, TradeDirection, ProductState
+                    
+                    product_spec = ProductSpec(
+                        name_pt=product.name_pt,
+                        name_it=product.name_it,
+                        name_en=product.name_en or "",
+                        ncm_code=product.ncm_code,
+                        hs_code=product.hs_code,
+                        taric_code=product.taric_code,
+                        state=ProductState(product.state.value),
+                        shelf_life_days=product.shelf_life_days,
+                        transport_days_avg=product.transport_days_avg,
+                        temperature_min_c=product.temperature_min_c,
+                        temperature_max_c=product.temperature_max_c,
+                        requires_phytosanitary_cert=product.requires_phytosanitary_cert,
+                        requires_health_cert=product.requires_health_cert,
+                        critical_substances=product.critical_substances or []
+                    )
+                    
+                    engine = SentinelScore2Engine(TradeDirection(product.direction.value))
+                    
+                    result = engine.calculate_risk_score(
+                        product=product_spec,
+                        rasff_data={'alerts_6m': alerts_6m, 'alerts_12m': alerts_12m},
+                        lmr_data=[],
+                        phyto_data={'alerts': []},
+                        transport_data={}
+                    )
+                    
+                    # Salvar avaliação
+                    assessment = RiskAssessment(
+                        product_id=product.id,
+                        final_score=result['score'],
+                        status=RiskStatusDB(result['status']),
+                        rasff_score=result['components']['rasff_score'],
+                        lmr_score=result['components']['lmr_score'],
+                        phyto_score=result['components']['phyto_score'],
+                        logistic_score=result['components']['logistic_score'],
+                        penalty=result['components']['penalty'],
+                        rasff_alerts_6m=alerts_6m,
+                        rasff_alerts_12m=alerts_12m,
+                        recommendations=result['recommendations']
+                    )
+                    
+                    db.add(assessment)
+            
+            db.commit()
+            print(f"[SCHEDULER] ✓ Riscos recalculados para {len(products)} produtos")
+            
+        except Exception as e:
+            print(f"[SCHEDULER] ✗ Erro no recálculo: {e}")
+        
+        finally:
+            db.close()
+    
+    def stop(self):
+        """Para scheduler"""
+        self.scheduler.shutdown()
+
+
+# ============================================================================
+# 7. INTEGRAÇÃO SISCOMEX (Validação NCM)
+# ============================================================================
+
+class SISCOMEXValidator:
+    """
+    Validador de códigos NCM via SISCOMEX
+    Base: https://www.gov.br/siscomex/
+    """
+    
+    BASE_URL = "https://portalunico.siscomex.gov.br/classif"
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        })
+    
+    def validate_ncm(self, ncm_code: str) -> Dict:
+        """
+        Valida código NCM e retorna informações
+        
+        Returns:
+            {
+                'valid': bool,
+                'description': str,
+                'taxes': dict,
+                'restrictions': list
+            }
+        """
+        
+        # Limpar NCM (apenas números)
+        ncm_clean = re.sub(r'\D', '', ncm_code)
+        
+        if len(ncm_clean) != 8:
+            return {'valid': False, 'error': 'NCM deve ter 8 dígitos'}
+        
+        try:
+            # Consultar API (endpoint fictício - ajustar para API real)
+            url = f"{self.BASE_URL}/api/ncm/{ncm_clean}"
+            response = self.session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                return {
+                    'valid': True,
+                    'ncm': ncm_clean,
+                    'description': data.get('description', 'N/A'),
+                    'taxes': {
+                        'ii': data.get('ii', 0),  # Imposto de Importação
+                        'ipi': data.get('ipi', 0)  # IPI
+                    },
+                    'restrictions': data.get('restrictions', [])
+                }
+            
+            else:
+                # Fallback: Usar validação básica
+                return self._validate_ncm_basic(ncm_clean)
+        
+        except Exception as e:
+            print(f"[SISCOMEX] Erro: {e}")
+            return self._validate_ncm_basic(ncm_clean)
+    
+    def _validate_ncm_basic(self, ncm_code: str) -> Dict:
+        """Validação básica de NCM (fallback)"""
+        
+        # Database simples de NCMs conhecidos
+        known_ncms = {
+            '09011100': 'Café não torrado, não descafeinado',
+            '08119050': 'Açaí',
+            '20091100': 'Suco de laranja congelado',
+            '12010010': 'Soja para semeadura',
+            '08081000': 'Maçãs frescas',
+            '04069050': 'Queijo Parmesão',
+            '15091090': 'Azeite de oliva virgem'
+        }
+        
+        if ncm_code in known_ncms:
+            return {
+                'valid': True,
+                'ncm': ncm_code,
+                'description': known_ncms[ncm_code],
+                'taxes': {'ii': 0, 'ipi': 0},
+                'restrictions': []
+            }
         
         return {
-            "product": {
-                "key": product.key,
-                "name_pt": product.name_pt,
-                "name_it": product.name_it,
-                "ncm_code": product.ncm_code,
-                "direction": product.direction
-            },
-            "intelligence": {
-                "status": product.ai_status,
-                "score": product.ai_score,
-                "risk_factors": product.ai_risk_factors or [],
-                "compliance_alerts": product.ai_compliance_alerts or [],
-                "technical_specs": product.ai_technical_specs or [],
-                "barriers": product.ai_barriers or {},
-                "documents_required": product.ai_documents_required or [],
-                "estimated_costs": product.ai_estimated_costs or {},
-                "data_source": "cache",
-                "last_updated": product.ai_last_check.isoformat() if product.ai_last_check else None,
-                "cache_age_hours": (
-                    (datetime.utcnow() - product.ai_last_check).total_seconds() / 3600
-                    if product.ai_last_check else None
-                )
+            'valid': False,
+            'ncm': ncm_code,
+            'error': 'NCM não encontrado na base de dados'
+        }
+
+
+# API endpoint para validação NCM
+@app.get("/api/validate-ncm/{ncm_code}")
+def validate_ncm_endpoint(ncm_code: str):
+    """Valida código NCM"""
+    
+    validator = SISCOMEXValidator()
+    result = validator.validate_ncm(ncm_code)
+    
+    if not result.get('valid'):
+        raise HTTPException(status_code=404, detail=result.get('error', 'Invalid NCM'))
+    
+    return result
+
+
+# ============================================================================
+# 8. WEBHOOKS (Integração com sistemas externos)
+# ============================================================================
+
+class WebhookManager:
+    """Gerenciador de webhooks para notificações externas"""
+    
+    @staticmethod
+    def trigger_webhook(url: str, payload: dict) -> bool:
+        """Dispara webhook para URL externa"""
+        
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                print(f"[WEBHOOK] ✓ Enviado para {url}")
+                return True
+            else:
+                print(f"[WEBHOOK] ✗ Erro {response.status_code} em {url}")
+                return False
+        
+        except Exception as e:
+            print(f"[WEBHOOK] ✗ Erro ao enviar: {e}")
+            return False
+    
+    @staticmethod
+    def send_risk_alert_webhook(webhook_url: str, product_key: str, score: float, status: str):
+        """Envia alerta de risco via webhook"""
+        
+        payload = {
+            'event': 'risk_alert',
+            'timestamp': datetime.utcnow().isoformat(),
+            'data': {
+                'product_key': product_key,
+                'risk_score': score,
+                'status': status,
+                'severity': 'high' if score > 65 else 'medium'
             }
         }
+        
+        return WebhookManager.trigger_webhook(webhook_url, payload)
+
+
+# API endpoint para configurar webhooks
+@app.post("/api/webhooks")
+def configure_webhook(
+    url: str,
+    events: List[str],
+    db: SessionLocal = Depends(get_db)
+):
+    """Configura webhook para eventos do sistema"""
     
-    # Cache expired or no data - Launch AI research
-    logger.info("🚀 Launching real-time AI research...")
-    
-    if not ai_agent:
-        raise HTTPException(
-            status_code=503,
-            detail="AI Agent not configured"
-        )
-    
-    ai_data = ai_agent.run_deep_search(
-        product_name=product.name_pt,
-        ncm_code=product.ncm_code,
-        direction=product.direction or "export",
-        origin_country="Brasil",
-        destination_country="Itália"
-    )
-    
-    if not ai_data:
-        raise HTTPException(
-            status_code=500,
-            detail="AI research failed"
-        )
-    
-    # Save to cache
-    CacheManager.save_ai_results(product, ai_data, db)
-    
-    logger.info("✅ Fresh AI intelligence returned")
+    # TODO: Salvar configuração de webhook no banco
     
     return {
-        "product": {
-            "key": product.key,
-            "name_pt": product.name_pt,
-            "name_it": product.name_it,
-            "ncm_code": product.ncm_code,
-            "direction": product.direction
-        },
-        "intelligence": {
-            "status": ai_data.get('status'),
-            "score": ai_data.get('score'),
-            "risk_factors": ai_data.get('risk_factors', []),
-            "compliance_alerts": ai_data.get('compliance_alerts', []),
-            "technical_specs": ai_data.get('technical_specs', []),
-            "barriers": ai_data.get('barriers', {}),
-            "documents_required": ai_data.get('documents_required', []),
-            "estimated_costs": ai_data.get('estimated_costs', {}),
-            "data_source": "live_ai",
-            "last_updated": datetime.utcnow().isoformat(),
-            "cache_age_hours": 0
-        }
+        'message': 'Webhook configured',
+        'url': url,
+        'events': events
     }
 
-@app.get("/api/products/{product_key}/export-pdf")
-async def export_business_class_pdf(product_key: str, db: SessionLocal = Depends(get_db)):
-    """
-    Generate Business Class PDF Report
+
+# ============================================================================
+# 9. EXPORT/IMPORT DE DADOS (Backup e Migração)
+# ============================================================================
+
+@cli.command()
+@click.option('--output', default='backup/zoi_backup.json')
+def export_data(output):
+    """Exporta todos os dados do sistema"""
     
-    CRITICAL: This endpoint ALWAYS waits for AI completion
-    to ensure the PDF contains real-time verified data.
-    """
+    db = SessionLocal()
     
-    logger.info(f"\n{'━'*80}")
-    logger.info(f"📄 PDF GENERATION REQUEST: {product_key}")
-    logger.info(f"{'━'*80}")
-    
-    # Find product
-    product = db.query(Product).filter(Product.key == product_key).first()
-    
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    
-    # Check cache validity
-    cache_valid = CacheManager.is_cache_valid(product)
-    
-    ai_data = None
-    verification_time = datetime.utcnow()
-    
-    if not cache_valid:
-        logger.info("⏳ Cache invalid - Launching AI research for PDF...")
-        
-        if not ai_agent:
-            raise HTTPException(
-                status_code=503,
-                detail="AI Agent not configured"
-            )
-        
-        # CRITICAL: Wait for AI completion
-        ai_data = ai_agent.run_deep_search(
-            product_name=product.name_pt,
-            ncm_code=product.ncm_code,
-            direction=product.direction or "export",
-            origin_country="Brasil",
-            destination_country="Itália"
-        )
-        
-        if not ai_data:
-            raise HTTPException(
-                status_code=500,
-                detail="AI research failed - cannot generate PDF"
-            )
-        
-        # Save fresh data
-        CacheManager.save_ai_results(product, ai_data, db)
-        
-        logger.info("✅ Fresh AI data acquired for PDF")
-    
-    else:
-        logger.info("✅ Using valid cached data for PDF")
-        
-        # Use cached data
-        ai_data = {
-            'status': product.ai_status,
-            'score': product.ai_score,
-            'risk_factors': product.ai_risk_factors or [],
-            'compliance_alerts': product.ai_compliance_alerts or [],
-            'technical_specs': product.ai_technical_specs or [],
-            'barriers': product.ai_barriers or {},
-            'documents_required': product.ai_documents_required or [],
-            'estimated_costs': product.ai_estimated_costs or {}
-        }
-        
-        verification_time = product.ai_last_check or datetime.utcnow()
-    
-    # Generate Business Class PDF
-    logger.info("📄 Generating Business Class PDF...")
-    
-    pdf_gen = BusinessClassPDFGenerator()
-    
-    product_data = {
-        'name_pt': product.name_pt,
-        'name_it': product.name_it,
-        'ncm_code': product.ncm_code,
-        'direction': product.direction
+    data = {
+        'exported_at': datetime.utcnow().isoformat(),
+        'version': '2.0',
+        'products': [],
+        'risk_assessments': [],
+        'users': []
     }
     
-    pdf_buffer = pdf_gen.generate_dossier(
-        product_data=product_data,
-        ai_data=ai_data,
-        verification_time=verification_time
-    )
-    
-    logger.info("✅ Business Class PDF generated successfully")
-    logger.info(f"{'━'*80}\n")
-    
-    return StreamingResponse(
-        pdf_buffer,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f"attachment; filename=zoi_dossier_{product_key}.pdf"
-        }
-    )
-
-@app.post("/api/products/{product_key}/refresh")
-def force_ai_refresh(product_key: str, db: SessionLocal = Depends(get_db)):
-    """
-    Force AI research refresh (ignore cache)
-    """
-    
-    logger.info(f"🔄 Force refresh requested for {product_key}")
-    
-    product = db.query(Product).filter(Product.key == product_key).first()
-    
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    
-    if not ai_agent:
-        raise HTTPException(status_code=503, detail="AI Agent not configured")
-    
-    ai_data = ai_agent.run_deep_search(
-        product_name=product.name_pt,
-        ncm_code=product.ncm_code,
-        direction=product.direction or "export"
-    )
-    
-    if not ai_data:
-        raise HTTPException(status_code=500, detail="AI research failed")
-    
-    CacheManager.save_ai_results(product, ai_data, db)
-    
-    return {
-        "message": "AI research completed successfully",
-        "product_key": product_key,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-@app.get("/api/products")
-def list_products(db: SessionLocal = Depends(get_db)):
-    """List all products"""
+    # Exportar produtos
     products = db.query(Product).all()
+    for p in products:
+        data['products'].append({
+            'key': p.key,
+            'name_pt': p.name_pt,
+            'name_it': p.name_it,
+            'ncm_code': p.ncm_code,
+            'direction': p.direction.value,
+            'state': p.state.value
+        })
     
-    return {
-        "products": [
-            {
-                "key": p.key,
-                "name_pt": p.name_pt,
-                "ncm_code": p.ncm_code,
-                "direction": p.direction,
-                "cache_valid": CacheManager.is_cache_valid(p),
-                "last_check": p.ai_last_check.isoformat() if p.ai_last_check else None
-            }
-            for p in products
-        ]
-    }
+    # Exportar avaliações
+    assessments = db.query(RiskAssessment).all()
+    for a in assessments:
+        data['risk_assessments'].append({
+            'product_id': a.product_id,
+            'score': a.final_score,
+            'status': a.status.value,
+            'timestamp': a.calculation_timestamp.isoformat()
+        })
+    
+    # Exportar usuários (sem senhas)
+    users = db.query(User).all()
+    for u in users:
+        data['users'].append({
+            'email': u.email,
+            'full_name': u.full_name,
+            'is_admin': u.is_admin
+        })
+    
+    # Salvar
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    click.echo(f"✓ Backup salvo em {output_path}")
+    click.echo(f"  Produtos: {len(data['products'])}")
+    click.echo(f"  Avaliações: {len(data['risk_assessments'])}")
+    click.echo(f"  Usuários: {len(data['users'])}")
+    
+    db.close()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+# ============================================================================
+# 10. MAIN APPLICATION RUNNER (CORRIGIDO E ALINHADO)
+# ============================================================================
+
+def run_api_server():
+    """Inicia servidor FastAPI com ajustes para o Render"""
     import uvicorn
+    import os
     
+    # Criar tabelas antes de iniciar
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("✓ Banco de dados inicializado.")
+    except Exception as e:
+        print(f"⚠ Erro no DB: {e}")
+
+    # PORTA DINÂMICA DO RENDER
     port = int(os.environ.get("PORT", 8000))
     
-    logger.info(f"\n{'━'*80}")
-    logger.info(f"🚀 ZOI SENTINEL v4.0 - LIVING INTELLIGENCE SYSTEM")
-    logger.info(f"{'━'*80}")
-    logger.info(f"🔌 Port: {port}")
-    logger.info(f"🧠 AI Agent: {'Manus AI' if ai_agent and ai_agent.use_manus else 'Dyad AI'}")
-    logger.info(f"💾 Cache Strategy: 24 hours")
-    logger.info(f"📄 PDF Design: Business Class")
-    logger.info(f"{'━'*80}\n")
-    
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
+    )
+
+if __name__ == "__main__":
+    run_api_server()
