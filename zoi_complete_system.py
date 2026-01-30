@@ -1,5 +1,5 @@
 """
-ZOI Sentinel v4.0 - Zero Database Architecture
+ZOI Sentinel v4.2 - Zero Database Architecture + CORS Fix
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🧠 LIVING INTELLIGENCE SYSTEM
@@ -17,6 +17,11 @@ ZOI Sentinel v4.0 - Zero Database Architecture
    - Frontend Request → Check Cache (< 24h?) → If YES: Return
    - If NO: Launch Manus AI → Wait for completion → Save → Return
    - PDF Generation: ALWAYS wait for AI completion
+
+🔒 v4.2 FIXES:
+   - CORS restrito a zoi-sentinel-nav.lovable.app
+   - Tabela products_v4_2 com todas as colunas AI
+   - Auto-criação de tabelas no startup
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -72,8 +77,8 @@ Base = declarative_base()
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Product(Base):
-    """Tabela de produtos - Atualizada para v4.1"""
-    __tablename__ = 'products_v4_1'  # <--- MUDAMOS O NOME AQUI PARA CRIAR DO ZERO
+    """Tabela de produtos - Atualizada para v4.2"""
+    __tablename__ = 'products_v4_2'  # <--- MUDAMOS O NOME AQUI PARA CRIAR DO ZERO
     
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String, unique=True, index=True)
@@ -894,17 +899,23 @@ class BusinessClassPDFGenerator:
 # ══════════════════════════════════════════════════════════════════════════════
 
 app = FastAPI(
-    title="ZOI Sentinel v4.0",
-    description="Living Intelligence System - Zero Database Architecture",
-    version="4.0.0"
+    title="ZOI Sentinel v4.2",
+    description="Living Intelligence System - Zero Database Architecture + CORS Fix",
+    version="4.2.0"
 )
 
+# 🛡️ MIDDLEWARE DE CORS - RESTRITO AO SEU SUBDOMÍNIO
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://zoi-sentinel-nav.lovable.app",
+        "https://lovable.app",  # Mantido para permitir o acesso do editor
+        "http://localhost:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # Dependency
@@ -931,17 +942,20 @@ def root():
     """System status"""
     return {
         "service": "ZOI Sentinel",
-        "version": "4.0.0",
+        "version": "4.2.0",
         "architecture": "Zero Database - Living Intelligence",
         "status": "operational",
         "ai_agent": "Manus AI" if ai_agent and ai_agent.use_manus else "Dyad AI",
         "cache_strategy": "24 hours",
+        "cors": "Restricted to zoi-sentinel-nav.lovable.app",
+        "database_table": "products_v4_2",
         "features": [
             "🧠 Real-Time AI Research",
             "📡 Zero Static Compliance Tables",
             "🎯 24-Hour Cache Only",
             "📄 Business Class PDF Reports",
-            "⚡ Async/Await PDF Generation"
+            "⚡ Async/Await PDF Generation",
+            "🔒 CORS Security"
         ]
     }
 
@@ -1208,15 +1222,24 @@ def list_products(db: SessionLocal = Depends(get_db)):
 if __name__ == "__main__":
     import uvicorn
     
+    # 🛠️ CRIAR TABELAS ANTES DE INICIAR O SERVIDOR
+    try:
+        logger.info("🛠️ Sincronizando tabelas com o banco de dados...")
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Banco de dados v4.2 pronto para uso.")
+    except Exception as e:
+        logger.error(f"❌ Falha ao inicializar banco: {e}")
+    
     port = int(os.environ.get("PORT", 8000))
     
     logger.info(f"\n{'━'*80}")
-    logger.info(f"🚀 ZOI SENTINEL v4.0 - LIVING INTELLIGENCE SYSTEM")
+    logger.info(f"🚀 ZOI SENTINEL v4.2 - LIVING INTELLIGENCE SYSTEM")
     logger.info(f"{'━'*80}")
     logger.info(f"🔌 Port: {port}")
     logger.info(f"🧠 AI Agent: {'Manus AI' if ai_agent and ai_agent.use_manus else 'Dyad AI'}")
     logger.info(f"💾 Cache Strategy: 24 hours")
     logger.info(f"📄 PDF Design: Business Class")
+    logger.info(f"🔒 CORS: Restrito a zoi-sentinel-nav.lovable.app")
     logger.info(f"{'━'*80}\n")
     
     uvicorn.run(app, host="0.0.0.0", port=port)
@@ -1226,11 +1249,11 @@ def run_api_server():
     import uvicorn
     import os
     
-    # ESTE COMANDO CRIA A NOVA TABELA 'products_v4_1' AUTOMATICAMENTE
+    # ESTE COMANDO CRIA A NOVA TABELA 'products_v4_2' AUTOMATICAMENTE
     try:
         logger.info("🛠️ Sincronizando tabelas com o banco de dados...")
         Base.metadata.create_all(bind=engine)
-        logger.info("✅ Banco de dados v4.1 pronto para uso.")
+        logger.info("✅ Banco de dados v4.2 pronto para uso.")
     except Exception as e:
         logger.error(f"❌ Falha ao inicializar banco: {e}")
 
