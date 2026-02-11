@@ -87,13 +87,14 @@ app.add_middleware(
 MANUS_API_KEY = os.environ.get("MANUS_API_KEY", "")
 MANUS_BASE_URL = "https://api.manus.ai/v1"
 MANUS_AGENT_PROFILE = os.environ.get("MANUS_AGENT_PROFILE", "manus-1.6")
+MANUS_TASK_MODE = os.environ.get("MANUS_TASK_MODE", "chat")  # chat=fast, agent=thorough
 
 # Cache TTL
 CACHE_TTL_HOURS = int(os.environ.get("CACHE_TTL_HOURS", "24"))
 
 # Manus polling config
 MANUS_POLL_INTERVAL = 5       # seconds between polls
-MANUS_POLL_MAX_WAIT = 180     # max seconds to wait (3 min)
+MANUS_POLL_MAX_WAIT = 300     # max seconds to wait (5 min - Manus agent navega sites reais)
 
 
 # ============================================================================
@@ -128,55 +129,30 @@ def set_cached(slug: str, data: Dict):
 def build_compliance_prompt(product_name: str) -> str:
     """
     Prompt otimizado para o Manus pesquisar compliance de exportação.
-    O Manus vai navegar nos sites reais e extrair informações.
+    Mais curto = Manus processa mais rápido.
     """
-    return f"""Pesquise informações COMPLETAS e ATUALIZADAS de compliance para exportação do seguinte produto:
+    return f"""Pesquise compliance para exportação de "{product_name}" do Brasil para Itália/UE.
 
-PRODUTO: {product_name}
-ROTA COMERCIAL: Brasil → Itália (União Europeia)
+Consulte: MAPA (mapa.gov.br), ANVISA, Receita Federal (NCM), EUR-Lex, RASFF.
 
-PESQUISE NOS SEGUINTES PORTAIS OFICIAIS:
-1. MAPA (mapa.gov.br) - requisitos fitossanitários, certificações necessárias
-2. ANVISA (anvisa.gov.br) - regulamentações sanitárias aplicáveis
-3. Receita Federal / SISCOMEX - código NCM correto para este produto
-4. EUR-Lex (eur-lex.europa.eu) - regulamentos UE aplicáveis para importação
-5. RASFF Portal (webgate.ec.europa.eu/rasff-window) - alertas recentes para este produto do Brasil
-6. AGROSTAT / Comex Stat - dados de exportação recentes
-
-RETORNE AS INFORMAÇÕES NO SEGUINTE FORMATO JSON (APENAS o JSON, sem texto adicional):
+Retorne APENAS um JSON válido (sem texto extra) com esta estrutura:
 {{
-    "ncm_code": "código NCM do produto (ex: 1201.90.00)",
-    "product_name": "nome oficial do produto",
+    "ncm_code": "código NCM",
+    "product_name": "{product_name}",
     "product_name_it": "nome em italiano",
     "product_name_en": "nome em inglês",
-    "category": "categoria (ex: Grãos, Frutas, Bebidas)",
-    "risk_score": número de 0 a 100 (100 = baixo risco, seguro para exportar),
-    "risk_level": "LOW ou MEDIUM ou HIGH",
-    "status": "APPROVED ou RESTRICTED ou BLOCKED",
-    "certificates_required": [
-        {{"name": "nome do certificado", "issuer": "órgão emissor", "mandatory": true/false}}
-    ],
-    "eu_regulations": [
-        {{"code": "número do regulamento", "title": "título/descrição", "status": "active"}}
-    ],
-    "brazilian_requirements": ["lista de requisitos brasileiros"],
-    "max_residue_limits": {{
-        "substância": {{"limit": "limite máximo", "regulation": "regulamento"}}
-    }},
-    "tariff_info": {{
-        "eu_tariff": "tarifa aplicável",
-        "notes": "observações sobre tarifa"
-    }},
-    "alerts": ["alertas do RASFF ou avisos importantes"],
-    "export_volume_2024": "volume exportado em 2024 se disponível",
-    "sources_consulted": ["URLs dos portais consultados"]
-}}
-
-IMPORTANTE: 
-- Use APENAS dados oficiais e atualizados
-- Se não encontrar alguma informação, indique "Dados não disponíveis"
-- O risk_score deve refletir a realidade regulatória atual
-- Inclua TODOS os certificados necessários, não apenas os principais"""
+    "category": "categoria",
+    "risk_score": 0-100,
+    "risk_level": "LOW/MEDIUM/HIGH",
+    "status": "APPROVED/RESTRICTED/BLOCKED",
+    "certificates_required": [{{"name": "...", "issuer": "...", "mandatory": true}}],
+    "eu_regulations": [{{"code": "Reg. ...", "title": "...", "status": "active"}}],
+    "brazilian_requirements": ["requisito 1", "requisito 2"],
+    "max_residue_limits": {{"substancia": {{"limit": "valor", "regulation": "reg."}}}},
+    "tariff_info": {{"eu_tariff": "X%", "notes": "..."}},
+    "alerts": ["alerta 1"],
+    "sources_consulted": ["url1", "url2"]
+}}"""
 
 
 async def manus_create_task(product_name: str) -> Optional[str]:
@@ -207,7 +183,7 @@ async def manus_create_task(product_name: str) -> Optional[str]:
                 json={
                     "prompt": prompt,
                     "agentProfile": MANUS_AGENT_PROFILE,
-                    "taskMode": "agent",
+                    "taskMode": MANUS_TASK_MODE,
                 }
             )
             
@@ -297,58 +273,87 @@ def extract_json_from_manus_result(task_data: Dict) -> Optional[Dict]:
     Extrai o JSON de compliance do resultado do Manus.
     O Manus pode retornar o resultado em diferentes campos.
     """
-    # Tentar extrair de diferentes campos possíveis
     text_content = ""
     
-    # O resultado pode estar em 'output', 'result', 'message', ou 'content'
-    for field in ["output", "result", "message", "content", "response"]:
+    # Manus retorna em vários formatos possíveis
+    for field in ["output", "result", "message", "content", "response", "answer"]:
         if field in task_data and task_data[field]:
             val = task_data[field]
             if isinstance(val, str):
                 text_content = val
                 break
             elif isinstance(val, dict):
-                return val
+                if any(k in val for k in ["ncm_code", "product_name", "risk_score"]):
+                    return val
+                inner = val.get("text", "") or val.get("content", "") or val.get("body", "")
+                if inner:
+                    text_content = inner
+                    break
             elif isinstance(val, list):
-                # Pode ser lista de messages
-                for item in val:
+                for item in reversed(val):
                     if isinstance(item, dict):
-                        txt = item.get("text", "") or item.get("content", "")
-                        if txt:
-                            text_content = txt
+                        txt = item.get("text", "") or item.get("content", "") or item.get("message", "")
+                        if txt and len(str(txt)) > 50:
+                            text_content = str(txt)
                             break
+                    elif isinstance(item, str) and len(item) > 50:
+                        text_content = item
+                        break
+                if text_content:
+                    break
+    
+    # Verificar 'events' (Manus retorna lista de eventos)
+    if not text_content and "events" in task_data:
+        events = task_data["events"]
+        if isinstance(events, list):
+            for event in reversed(events):
+                if isinstance(event, dict):
+                    txt = event.get("content", "") or event.get("text", "") or event.get("data", "")
+                    if isinstance(txt, str) and len(txt) > 50:
+                        text_content = txt
+                        break
     
     if not text_content:
-        # Tentar serializar tudo e procurar JSON dentro
         text_content = json.dumps(task_data, default=str)
     
-    # Tentar extrair JSON do texto
+    # Logar preview para debug
+    logger.info(f"📝 Manus result preview ({len(text_content)} chars): {text_content[:300]}")
+    
     try:
-        # Procurar bloco JSON no texto
         import re
         
-        # Tentar encontrar JSON entre ```json ... ``` ou { ... }
-        json_patterns = [
-            r'```json\s*(.*?)\s*```',
-            r'```\s*(.*?)\s*```',
-            r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})',
+        patterns = [
+            r'```json\s*([\s\S]*?)\s*```',
+            r'```\s*([\s\S]*?)\s*```',
+            r'(\{[\s\S]*?"ncm_code"[\s\S]*?\})',
+            r'(\{[\s\S]*?"product_name"[\s\S]*?\})',
+            r'(\{[\s\S]*?"risk_score"[\s\S]*?\})',
         ]
         
-        for pattern in json_patterns:
-            matches = re.findall(pattern, text_content, re.DOTALL)
+        for pattern in patterns:
+            matches = re.findall(pattern, text_content)
             for match in matches:
                 try:
-                    parsed = json.loads(match)
+                    parsed = json.loads(match.strip())
                     if isinstance(parsed, dict) and any(k in parsed for k in ["ncm_code", "product_name", "risk_score"]):
+                        logger.info(f"✅ JSON extracted from Manus result")
                         return parsed
                 except json.JSONDecodeError:
                     continue
         
-        # Último recurso: tentar parsear o texto inteiro como JSON
-        return json.loads(text_content)
+        # Tentar parsear texto inteiro
+        try:
+            parsed = json.loads(text_content.strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
         
-    except (json.JSONDecodeError, Exception) as e:
-        logger.warning(f"⚠️ Could not extract JSON from Manus result: {e}")
+        logger.warning(f"⚠️ Could not parse Manus JSON. Content: {text_content[:500]}")
+        return None
+        
+    except Exception as e:
+        logger.warning(f"⚠️ JSON extraction error: {e}")
         return None
 
 
@@ -825,6 +830,7 @@ async def health():
         "architecture": "zero_database",
         "manus_ai": "configured" if MANUS_API_KEY else "NOT_CONFIGURED",
         "manus_profile": MANUS_AGENT_PROFILE,
+        "manus_task_mode": MANUS_TASK_MODE,
         "cache_size": len(PRODUCT_CACHE),
         "active_research": len([t for t in MANUS_TASKS.values() if t.get("status") == "running"]),
         "known_products": len(REFERENCE_DATA),
@@ -958,7 +964,7 @@ async def startup():
     logger.info("=" * 70)
     logger.info("🚀 ZOI SENTINEL v4.2 - Zero Database + Manus AI")
     logger.info(f"📡 Manus AI: {'✅ CONFIGURED' if MANUS_API_KEY else '❌ NOT CONFIGURED'}")
-    logger.info(f"🤖 Agent Profile: {MANUS_AGENT_PROFILE}")
+    logger.info(f"🤖 Agent Profile: {MANUS_AGENT_PROFILE} | Mode: {MANUS_TASK_MODE}")
     logger.info(f"📦 Reference products: {len(REFERENCE_DATA)}")
     logger.info(f"🌐 CORS origins: {len(ALLOWED_ORIGINS)}")
     if not MANUS_API_KEY:
