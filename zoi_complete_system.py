@@ -357,6 +357,39 @@ def extract_json_from_manus_result(task_data: Dict) -> Optional[Dict]:
     if not text_content:
         text_content = json.dumps(task_data, default=str)
     
+    def extract_text_from_literal(value) -> Optional[str]:
+        if isinstance(value, list):
+            for item in reversed(value):
+                if isinstance(item, dict):
+                    txt = item.get("text", "") or item.get("content", "") or item.get("message", "")
+                    if txt and len(str(txt)) > 50:
+                        return str(txt)
+                elif isinstance(item, str) and len(item) > 50:
+                    return item
+        elif isinstance(value, dict):
+            txt = value.get("text", "") or value.get("content", "") or value.get("message", "")
+            if txt and len(str(txt)) > 50:
+                return str(txt)
+        return None
+
+    try:
+        import ast
+
+        if text_content and ("'text'" in text_content or "'content'" in text_content):
+            if text_content.lstrip().startswith(("[", "{")):
+                literal = ast.literal_eval(text_content)
+                literal_text = extract_text_from_literal(literal)
+                if literal_text:
+                    text_content = literal_text
+    except Exception:
+        pass
+
+    if "\\n" in text_content or "\\\"" in text_content:
+        try:
+            text_content = text_content.encode().decode("unicode_escape")
+        except Exception:
+            pass
+
     # Logar preview para debug
     logger.info(f"📝 Manus result preview ({len(text_content)} chars): {text_content[:300]}")
     
