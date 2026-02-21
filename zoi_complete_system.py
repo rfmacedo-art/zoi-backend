@@ -303,7 +303,6 @@ def extract_json_from_manus_result(task_data: Dict) -> Optional[Dict]:
     """
     text_content = ""
     
-    
     # Manus retorna em vários formatos possíveis
     for field in ["output", "result", "message", "content", "response", "answer"]:
         if field in task_data and task_data[field]:
