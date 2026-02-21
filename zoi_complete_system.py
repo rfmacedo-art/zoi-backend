@@ -61,6 +61,8 @@ ALLOWED_ORIGINS = [
     f"https://{LOVABLE_PROJECT_ID}.lovableproject.com",
     f"https://preview--{LOVABLE_PROJECT_ID}.lovableproject.com",
     "https://zoi-trade-navigator.lovable.app",
+    "https://id-preview--c3f2427f-f2dc-48b6-a9da-a99a6d34fdff.lovable.app",
+    "https://zoi-sentinel-nav.lovable.app",
     "http://localhost:5173",
     "http://localhost:3000",
     "http://localhost:8080",
