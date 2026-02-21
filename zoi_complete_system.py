@@ -29,7 +29,7 @@ from typing import Optional, Dict, Any, List
 import httpx
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 # ============================================================================
 # LOGGING
@@ -79,6 +79,34 @@ app.add_middleware(
     expose_headers=["Content-Disposition", "X-ZOI-Version"],
     max_age=3600,
 )
+
+
+class BareOptionsMiddleware:
+    def __init__(self, app_instance):
+        self.app_instance = app_instance
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("method") == "OPTIONS":
+            headers = {k.decode(): v.decode() for k, v in scope.get("headers", [])}
+            if "access-control-request-method" not in headers:
+                origin = headers.get("origin", "")
+                allow_origin = origin if origin in ALLOWED_ORIGINS else ALLOWED_ORIGINS[0]
+                allow_headers = headers.get("access-control-request-headers", "*")
+                response = Response(
+                    status_code=200,
+                    headers={
+                        "Access-Control-Allow-Origin": allow_origin,
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
+                        "Access-Control-Allow-Headers": allow_headers,
+                        "Access-Control-Allow-Credentials": "true",
+                    },
+                )
+                await response(scope, receive, send)
+                return
+        await self.app_instance(scope, receive, send)
+
+
+app.add_middleware(BareOptionsMiddleware)
 
 
 # ============================================================================
@@ -279,17 +307,7 @@ def extract_json_from_manus_result(task_data: Dict) -> Optional[Dict]:
     for field in ["output", "result", "message", "content", "response", "answer"]:
         if field in task_data and task_data[field]:
             val = task_data[field]
-            if isinstance(val, str):
-                text_content = val
-                break
-            elif isinstance(val, dict):
-                if any(k in val for k in ["ncm_code", "product_name", "risk_score"]):
-                    return val
-                inner = val.get("text", "") or val.get("content", "") or val.get("body", "")
-                if inner:
-                    text_content = inner
-                    break
-            elif isinstance(val, list):
+            if isinstance(val, list):
                 for item in reversed(val):
                     if isinstance(item, dict):
                         txt = item.get("text", "") or item.get("content", "") or item.get("message", "")
@@ -301,6 +319,28 @@ def extract_json_from_manus_result(task_data: Dict) -> Optional[Dict]:
                         break
                 if text_content:
                     break
+            if isinstance(val, str):
+                text_content = val
+                break
+            elif isinstance(val, dict):
+                if any(k in val for k in ["ncm_code", "product_name", "risk_score"]):
+                    return val
+                inner = val.get("text", "") or val.get("content", "") or val.get("body", "")
+                if inner:
+                    text_content = inner
+                    break
+
+    # Manus pode retornar lista direta de eventos/textos
+    if not text_content and isinstance(task_data, list):
+        for item in reversed(task_data):
+            if isinstance(item, dict):
+                txt = item.get("text", "") or item.get("content", "") or item.get("message", "")
+                if txt and len(str(txt)) > 50:
+                    text_content = str(txt)
+                    break
+            elif isinstance(item, str) and len(item) > 50:
+                text_content = item
+                break
     
     # Verificar 'events' (Manus retorna lista de eventos)
     if not text_content and "events" in task_data:
