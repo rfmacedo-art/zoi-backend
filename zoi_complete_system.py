@@ -50,7 +50,7 @@ app = FastAPI(
 )
 
 # ============================================================================
-# CORS (DEVE SER O PRIMEIRO MIDDLEWARE)
+# CORS (middleware)
 # ============================================================================
 LOVABLE_PROJECT_ID = os.environ.get(
     "LOVABLE_PROJECT_ID",
@@ -69,17 +69,6 @@ ALLOWED_ORIGINS = [
 extra_origins = os.environ.get("EXTRA_CORS_ORIGINS", "")
 if extra_origins:
     ALLOWED_ORIGINS.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition", "X-ZOI-Version"],
-    max_age=3600,
-)
-
 
 class BareOptionsMiddleware:
     def __init__(self, app_instance):
@@ -107,6 +96,16 @@ class BareOptionsMiddleware:
 
 
 app.add_middleware(BareOptionsMiddleware)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-ZOI-Version"],
+    max_age=3600,
+)
 
 
 # ============================================================================
