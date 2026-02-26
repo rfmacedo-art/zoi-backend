@@ -1,20 +1,21 @@
 """
 =============================================================================
-ZOI SENTINEL v4.2 - Zero Database Architecture
-REAL Manus AI Integration + Intelligent Fallback
+ZOI SENTINEL v5.0 - Zero Database Architecture
+Claude AI (Anthropic) Integration + Intelligent Fallback
 =============================================================================
 
 Fluxo de pesquisa:
 1. Cliente pede produto → verifica cache
-2. Se não tem cache → retorna dados de referência + dispara pesquisa Manus
-3. Manus pesquisa nos portais reais (MAPA, ANVISA, EUR-Lex, RASFF)
+2. Se não tem cache → retorna dados de referência + dispara pesquisa Claude
+3. Claude pesquisa na web (MAPA, ANVISA, EUR-Lex, RASFF) via web_search tool
 4. Resultado fica em cache para próximas requisições
 5. Cliente pode forçar refresh via /refresh endpoint
 
-A API do Manus é ASSÍNCRONA:
-- POST /v1/tasks → cria task, retorna task_id
-- GET /v1/tasks/{task_id} → poll status (pending/running/completed/failed)
-- Resultado vem quando status = completed
+Integração Claude API:
+- SDK anthropic (AsyncAnthropic)
+- Modelo: claude-sonnet-4-20250514 (configurável via CLAUDE_MODEL)
+- Tool web_search nativa — Claude navega fontes reais e retorna JSON estruturado
+- Chamada síncrona única — sem polling, sem timeout de 5 min
 =============================================================================
 """
 
@@ -27,6 +28,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
 import httpx
+import anthropic
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, Response
@@ -44,9 +46,9 @@ logger = logging.getLogger("ZOI_SENTINEL_V4")
 # APP
 # ============================================================================
 app = FastAPI(
-    title="ZOI Sentinel v4.2 - Trade Advisory",
-    description="Zero Database Architecture - Real-time Manus AI Compliance Research",
-    version="4.2.0"
+    title="ZOI Sentinel v5.0 - Trade Advisory",
+    description="Zero Database Architecture - Real-time Claude AI Compliance Research",
+    version="5.0.0"
 )
 
 # ============================================================================
@@ -113,17 +115,14 @@ app.add_middleware(
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-MANUS_API_KEY = os.environ.get("MANUS_API_KEY", "")
-MANUS_BASE_URL = "https://api.manus.ai/v1"
-MANUS_AGENT_PROFILE = os.environ.get("MANUS_AGENT_PROFILE", "manus-1.6")
-MANUS_TASK_MODE = os.environ.get("MANUS_TASK_MODE", "chat")  # chat=fast, agent=thorough
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
 
 # Cache TTL
 CACHE_TTL_HOURS = int(os.environ.get("CACHE_TTL_HOURS", "24"))
 
-# Manus polling config
-MANUS_POLL_INTERVAL = 5       # seconds between polls
-MANUS_POLL_MAX_WAIT = 300     # max seconds to wait (5 min - Manus agent navega sites reais)
+# Timeout para pesquisa Claude (segundos) — bem menor que Manus
+CLAUDE_RESEARCH_TIMEOUT = int(os.environ.get("CLAUDE_RESEARCH_TIMEOUT", "90"))
 
 
 # ============================================================================
@@ -206,7 +205,7 @@ def apply_regulatory_truth(data: Dict) -> Dict:
 
 
 PRODUCT_CACHE: Dict[str, Dict[str, Any]] = {}
-MANUS_TASKS: Dict[str, Dict[str, Any]] = {}  # track ongoing Manus tasks per product
+CLAUDE_RESEARCH_TASKS: Dict[str, Dict[str, Any]] = {}  # track ongoing Claude research per product
 
 
 def get_cached(slug: str) -> Optional[Dict]:
@@ -228,369 +227,178 @@ def set_cached(slug: str, data: Dict):
 
 
 # ============================================================================
-# MANUS AI - REAL INTEGRATION
+# CLAUDE AI - INTEGRAÇÃO ANTHROPIC
 # ============================================================================
 
 def build_compliance_prompt(product_name: str) -> str:
     """
-    Prompt otimizado para o Manus pesquisar compliance de exportação.
-    Inclui lista de substâncias banidas para evitar alucinações.
+    Prompt otimizado para o Claude pesquisar compliance de exportação via web_search.
+    Instrui o Claude a consultar fontes oficiais e retornar JSON estruturado.
     """
-    return f"""Pesquise compliance para exportação de "{product_name}" do Brasil para Itália/UE.
+    return f"""Você é um especialista em compliance de comércio exterior Brasil ↔ Itália/UE.
 
-Consulte: MAPA (mapa.gov.br), ANVISA, Receita Federal (NCM), EUR-Lex, RASFF.
+Pesquise na web os requisitos regulatórios atuais para exportação/importação de "{product_name}" na rota Brasil ↔ Itália.
 
-ATENÇÃO — SUBSTÂNCIAS BANIDAS NA UE (MRL = 0.01 mg/kg, tolerância zero):
-- Carbendazim: BANIDO — mutagênico/tóxico para reprodução
-- Imidacloprid: BANIDO — neonicotinoide, Reg. 2018/783
-- Thiamethoxam: BANIDO — neonicotinoide, Reg. 2018/785
-- Clothianidin: BANIDO — neonicotinoide, Reg. 2018/784
-- Thiacloprid: BANIDO — aprovação expirada 2020
-Se qualquer dessas substâncias for detectada, status deve ser "BANIDO" e limit "0.01 mg/kg".
-NUNCA classifique substâncias banidas como "Conforme".
+Consulte obrigatoriamente: mapa.gov.br, anvisa.gov.br, receita.fazenda.gov.br (NCM), eur-lex.europa.eu, ec.europa.eu/food/plant/pesticides/eu-pesticides-database, RASFF (rasff.eu).
 
-Retorne APENAS um JSON válido (sem texto extra) com esta estrutura:
+REGRAS CRÍTICAS — NUNCA IGNORAR:
+1. Carbendazim, Imidacloprid, Thiamethoxam, Clothianidin, Thiacloprid estão BANIDOS na UE. Se presentes, status = "BANIDO", limit = "0.01 mg/kg". NUNCA classifique como "Conforme".
+2. NCM deve corresponder à forma comercial exata (polpa congelada ≠ fruta fresca ≠ suco concentrado).
+3. Se produto tem substâncias banidas, status NUNCA pode ser "APPROVED" — usar "REQUIRES ATTENTION".
+
+Retorne APENAS o JSON abaixo, sem texto adicional, sem markdown, sem backticks:
 {{
-    "ncm_code": "código NCM correto para a forma exportada (polpa congelada ≠ fruta fresca)",
+    "ncm_code": "código NCM correto para a forma exportada",
     "product_name": "{product_name}",
     "product_name_it": "nome em italiano",
     "product_name_en": "nome em inglês",
-    "category": "categoria",
+    "category": "categoria do produto",
     "risk_score": 0-100,
     "risk_level": "LOW/MEDIUM/HIGH",
-    "status": "APPROVED/RESTRICTED/BLOCKED",
-    "certificates_required": [{{"name": "...", "issuer": "...", "mandatory": true}}],
-    "eu_regulations": [{{"code": "Reg. ...", "title": "...", "status": "active"}}],
+    "status": "ZOI APPROVED/REQUIRES ATTENTION/BLOCKED",
+    "trade_route": {{"origin": "BR ou IT", "destination": "IT ou BR", "origin_name": "Brasil ou Itália", "destination_name": "Itália ou Brasil"}},
+    "certificates_required": [{{"name": "nome", "issuer": "emissor", "mandatory": true}}],
+    "eu_regulations": [{{"code": "Reg. ...", "title": "título", "status": "active"}}],
     "brazilian_requirements": ["requisito 1", "requisito 2"],
     "max_residue_limits": {{
         "substancia": {{
             "limit": "X mg/kg",
             "status": "BANIDO ou CONFORME",
-            "regulation": "Reg. aplicável",
+            "regulation": "Regulamento aplicável",
             "note": "explicação"
         }}
     }},
-    "tariff_info": {{"eu_tariff": "X%", "notes": "..."}},
-    "alerts": ["alerta 1"],
+    "tariff_info": {{"eu_tariff": "X%", "notes": "informações tarifárias"}},
+    "alerts": ["alerta importante 1"],
     "sources_consulted": ["url1", "url2"]
 }}"""
 
 
-async def manus_create_task(product_name: str) -> Optional[str]:
+async def research_product_via_claude(product_slug: str, product_name: str) -> Optional[Dict]:
     """
-    Cria uma task no Manus AI para pesquisar compliance.
-    Retorna o task_id ou None se falhar.
-    
-    API: POST https://api.manus.ai/v1/tasks
-    Headers: API_KEY: <key>
-    Body: {"prompt": "...", "agentProfile": "manus-1.6"}
-    Response: {"task_id": "...", "task_title": "...", "task_url": "..."}
+    Pesquisa compliance via Claude API com web_search tool nativa.
+    Substitui completamente a integração Manus (sem polling, sem task_id).
+    Tempo típico: 15-40s vs 60-120s do Manus.
     """
-    if not MANUS_API_KEY:
-        logger.warning("⚠️ MANUS_API_KEY not configured")
+    if not ANTHROPIC_API_KEY:
+        logger.warning("⚠️ ANTHROPIC_API_KEY não configurada")
         return None
 
-    prompt = build_compliance_prompt(product_name)
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{MANUS_BASE_URL}/tasks",
-                headers={
-                    "API_KEY": MANUS_API_KEY,
-                    "Content-Type": "application/json",
-                    "accept": "application/json",
-                },
-                json={
-                    "prompt": prompt,
-                    "agentProfile": MANUS_AGENT_PROFILE,
-                    "taskMode": MANUS_TASK_MODE,
-                }
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                task_id = data.get("task_id")
-                logger.info(f"✅ Manus task created: {task_id}")
-                logger.info(f"   Task URL: {data.get('task_url', 'N/A')}")
-                return task_id
-            else:
-                logger.error(f"❌ Manus create task failed: {response.status_code} - {response.text}")
-                return None
-                
-    except Exception as e:
-        logger.error(f"❌ Manus API error: {e}")
-        return None
+    logger.info(f"🤖 CLAUDE RESEARCH START: {product_name}")
 
-
-async def manus_get_task(task_id: str) -> Optional[Dict]:
-    """
-    Busca o status/resultado de uma task do Manus.
-    
-    API: GET https://api.manus.ai/v1/tasks/{task_id}
-    Headers: API_KEY: <key>
-    Response inclui status: pending, running, completed, failed
-    """
-    if not MANUS_API_KEY:
-        return None
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{MANUS_BASE_URL}/tasks/{task_id}",
-                headers={
-                    "API_KEY": MANUS_API_KEY,
-                    "accept": "application/json",
-                }
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.error(f"❌ Manus get task failed: {response.status_code}")
-                return None
-                
-    except Exception as e:
-        logger.error(f"❌ Manus poll error: {e}")
-        return None
-
-
-async def manus_poll_until_complete(task_id: str) -> Optional[Dict]:
-    """
-    Poll a Manus task até completar ou timeout.
-    Retorna o resultado da task ou None.
-    """
-    elapsed = 0
-    
-    while elapsed < MANUS_POLL_MAX_WAIT:
-        task_data = await manus_get_task(task_id)
-        
-        if task_data is None:
-            return None
-        
-        status = task_data.get("status", "unknown")
-        logger.info(f"📊 Manus task {task_id}: status={status} (elapsed={elapsed}s)")
-        
-        if status == "completed":
-            logger.info(f"✅ Manus task completed: {task_id}")
-            return task_data
-        elif status == "failed":
-            logger.error(f"❌ Manus task failed: {task_id}")
-            return None
-        elif status in ("error",):
-            logger.error(f"❌ Manus task error: {task_id}")
-            return None
-        
-        # Still pending/running, wait and poll again
-        await asyncio.sleep(MANUS_POLL_INTERVAL)
-        elapsed += MANUS_POLL_INTERVAL
-    
-    logger.warning(f"⏰ Manus task timeout after {MANUS_POLL_MAX_WAIT}s: {task_id}")
-    return None
-
-
-def extract_json_from_manus_result(task_data: Dict) -> Optional[Dict]:
-    """
-    Extrai o JSON de compliance do resultado do Manus.
-    O Manus pode retornar o resultado em diferentes campos.
-    """
-    text_content = ""
-    
-    # Manus retorna em vários formatos possíveis
-    for field in ["output", "result", "message", "content", "response", "answer"]:
-        if field in task_data and task_data[field]:
-            val = task_data[field]
-            if isinstance(val, list):
-                for item in reversed(val):
-                    if isinstance(item, dict):
-                        txt = item.get("text", "") or item.get("content", "") or item.get("message", "")
-                        if txt and len(str(txt)) > 50:
-                            text_content = str(txt)
-                            break
-                    elif isinstance(item, str) and len(item) > 50:
-                        text_content = item
-                        break
-                if text_content:
-                    break
-            if isinstance(val, str):
-                text_content = val
-                break
-            elif isinstance(val, dict):
-                if any(k in val for k in ["ncm_code", "product_name", "risk_score"]):
-                    return val
-                inner = val.get("text", "") or val.get("content", "") or val.get("body", "")
-                if inner:
-                    text_content = inner
-                    break
-
-    # Manus pode retornar lista direta de eventos/textos
-    if not text_content and isinstance(task_data, list):
-        for item in reversed(task_data):
-            if isinstance(item, dict):
-                txt = item.get("text", "") or item.get("content", "") or item.get("message", "")
-                if txt and len(str(txt)) > 50:
-                    text_content = str(txt)
-                    break
-            elif isinstance(item, str) and len(item) > 50:
-                text_content = item
-                break
-    
-    # Verificar 'events' (Manus retorna lista de eventos)
-    if not text_content and "events" in task_data:
-        events = task_data["events"]
-        if isinstance(events, list):
-            for event in reversed(events):
-                if isinstance(event, dict):
-                    txt = event.get("content", "") or event.get("text", "") or event.get("data", "")
-                    if isinstance(txt, str) and len(txt) > 50:
-                        text_content = txt
-                        break
-    
-    if not text_content:
-        text_content = json.dumps(task_data, default=str)
-    
-    def extract_text_from_literal(value) -> Optional[str]:
-        if isinstance(value, list):
-            for item in reversed(value):
-                if isinstance(item, dict):
-                    txt = item.get("text", "") or item.get("content", "") or item.get("message", "")
-                    if txt and len(str(txt)) > 50:
-                        return str(txt)
-                elif isinstance(item, str) and len(item) > 50:
-                    return item
-        elif isinstance(value, dict):
-            txt = value.get("text", "") or value.get("content", "") or value.get("message", "")
-            if txt and len(str(txt)) > 50:
-                return str(txt)
-        return None
-
-    try:
-        import ast
-
-        if text_content and ("'text'" in text_content or "'content'" in text_content):
-            if text_content.lstrip().startswith(("[", "{")):
-                literal = ast.literal_eval(text_content)
-                literal_text = extract_text_from_literal(literal)
-                if literal_text:
-                    text_content = literal_text
-    except Exception:
-        pass
-
-    if "\\n" in text_content or "\\\"" in text_content:
-        try:
-            text_content = text_content.encode().decode("unicode_escape")
-        except Exception:
-            pass
-
-    # Logar preview para debug
-    logger.info(f"📝 Manus result preview ({len(text_content)} chars): {text_content[:300]}")
-    
-    try:
-        import re
-        
-        patterns = [
-            r'```json\s*([\s\S]*?)\s*```',
-            r'```\s*([\s\S]*?)\s*```',
-            r'(\{[\s\S]*?"ncm_code"[\s\S]*?\})',
-            r'(\{[\s\S]*?"product_name"[\s\S]*?\})',
-            r'(\{[\s\S]*?"risk_score"[\s\S]*?\})',
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, text_content)
-            for match in matches:
-                try:
-                    parsed = json.loads(match.strip())
-                    if isinstance(parsed, dict) and any(k in parsed for k in ["ncm_code", "product_name", "risk_score"]):
-                        logger.info(f"✅ JSON extracted from Manus result")
-                        return parsed
-                except json.JSONDecodeError:
-                    continue
-        
-        # Tentar parsear texto inteiro
-        try:
-            parsed = json.loads(text_content.strip())
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-        
-        logger.warning(f"⚠️ Could not parse Manus JSON. Content: {text_content[:500]}")
-        return None
-        
-    except Exception as e:
-        logger.warning(f"⚠️ JSON extraction error: {e}")
-        return None
-
-
-async def research_product_via_manus(product_slug: str, product_name: str) -> Optional[Dict]:
-    """
-    Fluxo completo: criar task → poll → extrair resultado.
-    """
-    logger.info(f"📡 MANUS RESEARCH START: {product_name}")
-    
-    # 1. Criar task
-    task_id = await manus_create_task(product_name)
-    if not task_id:
-        return None
-    
-    # Registrar task em andamento
-    MANUS_TASKS[product_slug] = {
-        "task_id": task_id,
+    CLAUDE_RESEARCH_TASKS[product_slug] = {
         "status": "running",
         "started_at": datetime.now().isoformat(),
     }
-    
-    # 2. Poll até completar
-    task_result = await manus_poll_until_complete(task_id)
-    
-    if task_result is None:
-        MANUS_TASKS[product_slug]["status"] = "timeout"
-        return None
-    
-    # 3. Extrair JSON
-    compliance_data = extract_json_from_manus_result(task_result)
-    
-    if compliance_data:
+
+    try:
+        client = anthropic.AsyncAnthropic(
+            api_key=ANTHROPIC_API_KEY,
+            timeout=CLAUDE_RESEARCH_TIMEOUT,
+        )
+
+        response = await client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=4096,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": build_compliance_prompt(product_name)}],
+        )
+
+        # Extrair texto da resposta (pode ter blocos tool_use + text)
+        text_content = ""
+        for block in response.content:
+            if hasattr(block, "text") and block.text:
+                text_content += block.text
+
+        logger.info(f"📝 Claude response preview ({len(text_content)} chars): {text_content[:200]}")
+
+        if not text_content.strip():
+            logger.warning(f"⚠️ Claude retornou resposta vazia para: {product_name}")
+            CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "empty_response"
+            return None
+
+        # Parse JSON — Claude é muito mais preciso que Manus, geralmente retorna JSON direto
+        import re
+        compliance_data = None
+
+        # 1. Tentar JSON direto
+        try:
+            compliance_data = json.loads(text_content.strip())
+        except json.JSONDecodeError:
+            pass
+
+        # 2. Extrair de bloco ```json``` se houver
+        if not compliance_data:
+            match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text_content)
+            if match:
+                try:
+                    compliance_data = json.loads(match.group(1).strip())
+                except json.JSONDecodeError:
+                    pass
+
+        # 3. Extrair objeto JSON do texto (fallback)
+        if not compliance_data:
+            match = re.search(r'(\{[\s\S]*"ncm_code"[\s\S]*\})', text_content)
+            if match:
+                try:
+                    compliance_data = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
+
+        if not compliance_data or not isinstance(compliance_data, dict):
+            logger.warning(f"⚠️ Claude não retornou JSON válido para: {product_name}")
+            logger.warning(f"   Conteúdo recebido: {text_content[:400]}")
+            CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "parse_error"
+            return None
+
         # Enriquecer com metadados
-        compliance_data["data_source"] = "manus_ai_realtime"
-        compliance_data["manus_task_id"] = task_id
+        compliance_data["data_source"] = "claude_ai_realtime"
+        compliance_data["claude_model"] = CLAUDE_MODEL
         compliance_data["needs_ai_update"] = False
         compliance_data["last_updated"] = datetime.now().isoformat()
-        compliance_data["trade_route"] = compliance_data.get("trade_route", {
+        compliance_data.setdefault("trade_route", {
             "origin": "BR", "destination": "IT",
             "origin_name": "Brasil", "destination_name": "Itália"
         })
 
-        # ⚡ VALIDAÇÃO REGULATÓRIA — corrige alucinações do Manus sobre banidos
+        # ⚡ VALIDAÇÃO REGULATÓRIA — garante que banidos sejam sempre banidos
         compliance_data = apply_regulatory_truth(compliance_data)
-        
-        MANUS_TASKS[product_slug]["status"] = "completed"
-        logger.info(f"✅ MANUS RESEARCH COMPLETE: {product_name}")
+
+        CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "completed"
+        logger.info(f"✅ CLAUDE RESEARCH COMPLETE: {product_name}")
         return compliance_data
-    
-    MANUS_TASKS[product_slug]["status"] = "parse_error"
-    logger.warning(f"⚠️ Manus completed but could not parse result for: {product_name}")
-    return None
+
+    except anthropic.APITimeoutError:
+        logger.error(f"⏰ Claude timeout ({CLAUDE_RESEARCH_TIMEOUT}s) para: {product_name}")
+        CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "timeout"
+        return None
+    except anthropic.APIError as e:
+        logger.error(f"❌ Claude API error para {product_name}: {e}")
+        CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "api_error"
+        return None
+    except Exception as e:
+        logger.error(f"❌ Erro inesperado na pesquisa Claude para {product_name}: {e}", exc_info=True)
+        CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "error"
+        return None
 
 
 # ============================================================================
 # BACKGROUND RESEARCH (não bloqueia a resposta ao cliente)
 # ============================================================================
 
-async def background_manus_research(product_slug: str, product_name: str):
+async def background_claude_research(product_slug: str, product_name: str):
     """
-    Executa pesquisa Manus em background.
+    Executa pesquisa Claude em background.
     O cliente recebe resposta imediata com dados de referência.
-    Quando Manus completar, o cache é atualizado.
+    Quando Claude completar (~20-40s), o cache é atualizado.
     """
     try:
-        result = await research_product_via_manus(product_slug, product_name)
+        result = await research_product_via_claude(product_slug, product_name)
         if result:
             set_cached(product_slug, result)
-            logger.info(f"🔄 Background research cached: {product_slug}")
+            logger.info(f"🔄 Background Claude research cached: {product_slug}")
     except Exception as e:
-        logger.error(f"❌ Background research error for {product_slug}: {e}")
+        logger.error(f"❌ Background Claude research error for {product_slug}: {e}")
 
 
 # ============================================================================
@@ -760,12 +568,868 @@ REFERENCE_DATA = {
             "market_access": {"score": 100, "level": "LOW"},
         },
     },
+
+    # =========================================================================
+    # BRASIL → ITÁLIA — FRESCOS E CONGELADOS
+    # Fonte: MDIC/ComexStat 2023-2024, MAPA AgroStat, Reg. (CE) 396/2005
+    # =========================================================================
+
+    "carne_bovina_congelada": {
+        "ncm_code": "0202.30.00",
+        "product_name": "Carne Bovina Congelada (desossada)",
+        "product_name_it": "Carne Bovina Congelata (disossata)",
+        "product_name_en": "Frozen Boneless Beef",
+        "category": "Carnes e Proteínas Animais",
+        "risk_score": 80,
+        "risk_level": "MEDIUM",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário Internacional (CSI)", "issuer": "MAPA/SIF", "mandatory": True},
+            {"name": "Certificado Fitossanitário", "issuer": "MAPA", "mandatory": True},
+            {"name": "Certificado de Habilitação do Estabelecimento", "issuer": "MAPA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise de Resíduos (hormônios e antibióticos)", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 852/2004", "title": "Higiene dos gêneros alimentícios", "status": "active"},
+            {"code": "Reg. (CE) 853/2004", "title": "Regras de higiene para produtos de origem animal", "status": "active"},
+            {"code": "Reg. (CE) 854/2004", "title": "Controlo oficial de produtos de origem animal", "status": "active"},
+            {"code": "Reg. (UE) 2019/627", "title": "Controlo oficial de produtos de origem animal", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Estabelecimento habilitado pelo MAPA para exportação à UE (lista positiva)",
+            "SIF ativo — inspeção federal obrigatória",
+            "APPCC/HACCP implementado",
+            "Cadeia fria mantida ≤ -18°C",
+            "Rastreabilidade individual do animal (SISBOV recomendado)",
+            "Proibição de hormônios de crescimento (Diretiva CE 96/22)",
+        ],
+        "max_residue_limits": {
+            "ivermectin": {"limit": "0.01 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL músculo bovino."},
+            "oxytetracycline": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 37/2010", "note": "MRL músculo bovino."},
+            "estradiol_17b": {"limit": "0.0005 mg/kg", "status": "BANIDO", "regulation": "Diretiva CE 96/22", "note": "Hormônio banido na UE para promoção de crescimento."},
+        },
+        "tariff_info": {"eu_tariff": "12.8% + €3.04/100kg", "notes": "Cota TRQ para carne bovina. Quota Hilton 0% para carne de alta qualidade."},
+        "alerts": [
+            "⚠️ Estabelecimento deve constar na lista positiva MAPA/UE — verificar antes de embarcar",
+            "🌡️ Cadeia fria ininterrupta ≤ -18°C obrigatória",
+            "🚫 Uso de hormônios de crescimento veda exportação à UE",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 75, "level": "MEDIUM"},
+            "regulatory": {"score": 80, "level": "MEDIUM"},
+            "logistics": {"score": 85, "level": "LOW"},
+            "market_access": {"score": 80, "level": "MEDIUM"},
+        },
+    },
+
+    "frango_congelado": {
+        "ncm_code": "0207.14.00",
+        "product_name": "Carne de Frango Congelada (pedaços e miudezas)",
+        "product_name_it": "Pollo Congelato (pezzi e frattaglie)",
+        "product_name_en": "Frozen Chicken (cuts and offal)",
+        "category": "Carnes e Proteínas Animais",
+        "risk_score": 82,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário Internacional (CSI)", "issuer": "MAPA/SIF", "mandatory": True},
+            {"name": "Certificado de Habilitação do Estabelecimento", "issuer": "MAPA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Laudo de Newcastle e Influenza Aviária", "issuer": "MAPA/SDA", "mandatory": True},
+            {"name": "Análise de Salmonella e Campylobacter", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 853/2004", "title": "Higiene para produtos de origem animal", "status": "active"},
+            {"code": "Reg. (CE) 2160/2003", "title": "Controlo da Salmonella e zoonoses", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (UE) 2019/1793", "title": "Controles reforçados na entrada de alimentos de países terceiros", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Estabelecimento habilitado pelo MAPA para exportação à UE",
+            "SIF ativo",
+            "APPCC/HACCP implementado",
+            "Vigilância obrigatória para Influenza Aviária e Newcastle",
+            "Cadeia fria ≤ -18°C",
+            "Plano de controle de Salmonella aprovado",
+        ],
+        "max_residue_limits": {
+            "enrofloxacin": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL músculo de aves."},
+            "chloramphenicol": {"limit": "0.0003 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 1950/2006", "note": "Antibiótico banido na UE — tolerância zero."},
+            "nitrofurans": {"limit": "0.001 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 1950/2006", "note": "Banido na UE — cancerígeno."},
+        },
+        "tariff_info": {"eu_tariff": "6.4-18.7%", "notes": "Varia por corte. Coxa/sobrecoxa: 15.4%. Peito: 26.2%. Cotas TRQ disponíveis."},
+        "alerts": [
+            "⚠️ Sujeito a controles reforçados na entrada UE — Reg. 2019/1793",
+            "🦠 Análise de Salmonella obrigatória em cada lote exportado",
+            "🚫 Chloramphenicol e nitrofuranos: tolerância zero na UE",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 80, "level": "MEDIUM"},
+            "regulatory": {"score": 85, "level": "LOW"},
+            "logistics": {"score": 85, "level": "LOW"},
+            "market_access": {"score": 80, "level": "MEDIUM"},
+        },
+    },
+
+    "camaro_congelado": {
+        "ncm_code": "0306.17.00",
+        "product_name": "Camarão Congelado (sem casca ou com casca)",
+        "product_name_it": "Gamberetti Congelati",
+        "product_name_en": "Frozen Shrimp",
+        "category": "Frutos do Mar e Pescados",
+        "risk_score": 72,
+        "risk_level": "MEDIUM",
+        "status": "REQUIRES ATTENTION",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário para Produtos da Pesca", "issuer": "MAPA/SIF", "mandatory": True},
+            {"name": "Certificado de Habilitação do Estabelecimento", "issuer": "MAPA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise microbiológica e de resíduos", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 853/2004", "title": "Higiene para produtos de origem animal", "status": "active"},
+            {"code": "Reg. (CE) 854/2004", "title": "Controlo oficial de produtos de origem animal", "status": "active"},
+            {"code": "Reg. (UE) 2019/1793", "title": "Controles reforçados — lista de países/produtos", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas e medicamentos veterinários", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Estabelecimento habilitado MAPA para exportação à UE",
+            "SIF ativo",
+            "APPCC/HACCP implementado",
+            "Plano de controle de resíduos veterinários (PNCRC)",
+            "Cadeia fria ≤ -18°C",
+        ],
+        "max_residue_limits": {
+            "oxytetracycline": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL crustáceos."},
+            "chloramphenicol": {"limit": "0.0003 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 1950/2006", "note": "Tolerância zero. Causa frequentes rejeições RASFF em camarão brasileiro."},
+            "nitrofurans": {"limit": "0.001 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 1950/2006", "note": "Banido. Detectado frequentemente em RASFF — monitorar fornecedores."},
+        },
+        "tariff_info": {"eu_tariff": "12%", "notes": "Camarão congelado sem casca. Possível redução via GSP."},
+        "alerts": [
+            "🔴 Camarão brasileiro figura com frequência no RASFF por Chloramphenicol — exigir laudos de todos os lotes",
+            "⚠️ Sujeito a controles reforçados na fronteira UE — Reg. 2019/1793",
+            "🌡️ Cadeia fria ≤ -18°C obrigatória durante todo o transporte",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 75, "level": "MEDIUM"},
+            "regulatory": {"score": 65, "level": "HIGH"},
+            "logistics": {"score": 80, "level": "MEDIUM"},
+            "market_access": {"score": 75, "level": "MEDIUM"},
+        },
+    },
+
+    "suco_laranja_congelado": {
+        "ncm_code": "2009.12.00",
+        "product_name": "Suco de Laranja Congelado (FCOJ — não fermentado)",
+        "product_name_it": "Succo di Arancia Congelato (FCOJ)",
+        "product_name_en": "Frozen Concentrated Orange Juice (FCOJ)",
+        "category": "Sucos e Polpas",
+        "risk_score": 90,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário", "issuer": "MAPA/ANVISA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise de resíduos de pesticidas", "issuer": "Laboratório acreditado", "mandatory": True},
+            {"name": "Certificado de Concentração Brix", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Diretiva 2001/112/CE", "title": "Sucos de fruta e produtos similares", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (UE) 1169/2011", "title": "Rotulagem de alimentos", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Registro no MAPA como exportador de sucos",
+            "Análise de resíduos conforme PNCRC",
+            "Brix mínimo 11.8° (FCOJ concentrado)",
+            "Armazenagem e transporte ≤ -18°C",
+        ],
+        "max_residue_limits": {
+            "imazalil": {"limit": "0.05 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "Fungicida pós-colheita permitido em sucos."},
+            "carbendazim": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 396/2005", "note": "Banido na UE — frequentemente detectado em FCOJ brasileiro no RASFF."},
+            "thiabendazole": {"limit": "0.05 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL para sucos de frutas cítricas."},
+        },
+        "tariff_info": {"eu_tariff": "7.9% + €20.6/100kg", "notes": "Brasil maior exportador mundial de FCOJ — alta demanda italiana."},
+        "alerts": [
+            "⚠️ Carbendazim frequentemente detectado em FCOJ no RASFF — exigir laudo específico",
+            "📋 Exige declaração de conformidade com Diretiva 2001/112/CE",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 90, "level": "LOW"},
+            "regulatory": {"score": 85, "level": "LOW"},
+            "logistics": {"score": 95, "level": "LOW"},
+            "market_access": {"score": 95, "level": "LOW"},
+        },
+    },
+
+    "polpa_maracuja": {
+        "ncm_code": "2008.99.00",
+        "product_name": "Polpa de Maracujá Congelada",
+        "product_name_it": "Polpa di Frutto della Passione Congelata",
+        "product_name_en": "Frozen Passion Fruit Pulp",
+        "category": "Frutas Tropicais",
+        "risk_score": 88,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário", "issuer": "MAPA", "mandatory": True},
+            {"name": "Certificado Sanitário", "issuer": "ANVISA/MAPA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise de Resíduos", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (UE) 1169/2011", "title": "Rotulagem de alimentos", "status": "active"},
+            {"code": "Reg. (CE) 852/2004", "title": "Higiene dos gêneros alimentícios", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Registro MAPA/SIF",
+            "BPF/GMP implementado",
+            "Cadeia fria -18°C",
+            "APPCC/HACCP",
+        ],
+        "max_residue_limits": {
+            "imidacloprid": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/783", "note": "Banido na UE desde 2018."},
+            "thiamethoxam": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/785", "note": "Banido na UE desde 2018."},
+            "lambda_cyhalothrin": {"limit": "0.05 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL para frutas tropicais."},
+        },
+        "tariff_info": {"eu_tariff": "20% (preparações de fruta)", "notes": "NCM 2008 tem tarifa mais alta que polpa pura. Avaliar classificação correta com despachante."},
+        "alerts": [
+            "📌 Confirmar NCM com despachante: polpa pura s/ açúcar → 0811.90.90 (tarifa menor)",
+            "🌡️ Manter cadeia fria -18°C sem interrupção",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 85, "level": "LOW"},
+            "regulatory": {"score": 85, "level": "LOW"},
+            "logistics": {"score": 80, "level": "MEDIUM"},
+            "market_access": {"score": 90, "level": "LOW"},
+        },
+    },
+
+    "manga_fresca": {
+        "ncm_code": "0804.50.00",
+        "product_name": "Manga Fresca (Tommy Atkins, Kent, Palmer)",
+        "product_name_it": "Mango Fresco",
+        "product_name_en": "Fresh Mango",
+        "category": "Frutas Tropicais",
+        "risk_score": 83,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário", "issuer": "MAPA/SDA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise de Resíduos de Pesticidas", "issuer": "Laboratório acreditado", "mandatory": True},
+            {"name": "Tratamento Quarentenário (se exigido)", "issuer": "MAPA", "mandatory": False},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (UE) 2019/1793", "title": "Controles reforçados na entrada de alimentos de países terceiros", "status": "active"},
+            {"code": "Reg. (CE) 1148/2001", "title": "Normas de qualidade para frutas e hortícolas frescos", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Certificado fitossanitário emitido pelo SDA/MAPA via ePhyto",
+            "Pomar registrado no MAPA",
+            "Análise de resíduos — PNCRC",
+            "Embalagem com rastreabilidade (produtor, lote, data)",
+        ],
+        "max_residue_limits": {
+            "imidacloprid": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/783", "note": "Banido na UE — não usar no pomar."},
+            "carbendazim": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 396/2005", "note": "Banido na UE — frequente no RASFF para manga brasileira."},
+            "prochloraz": {"limit": "0.05 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "Fungicida pós-colheita — respeitar carência."},
+            "azoxystrobin": {"limit": "0.2 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL para manga."},
+        },
+        "tariff_info": {"eu_tariff": "0% (Jun-Jul) / 3.2% (restante do ano)", "notes": "Tarifa sazonal favorável ao Brasil — safra Petrolina/Juazeiro alinhada."},
+        "alerts": [
+            "⚠️ Manga brasileira frequentemente notificada no RASFF por Carbendazim — laudo obrigatório",
+            "📅 Atenção à sazonalidade tarifária: embarque Jun-Jul tem tarifa zero",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 85, "level": "LOW"},
+            "regulatory": {"score": 75, "level": "MEDIUM"},
+            "logistics": {"score": 80, "level": "MEDIUM"},
+            "market_access": {"score": 90, "level": "LOW"},
+        },
+    },
+
+    "file_tilapia_congelado": {
+        "ncm_code": "0304.62.00",
+        "product_name": "Filé de Tilápia Congelado",
+        "product_name_it": "Filetto di Tilapia Congelato",
+        "product_name_en": "Frozen Tilapia Fillet",
+        "category": "Frutos do Mar e Pescados",
+        "risk_score": 86,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário para Produtos da Pesca", "issuer": "MAPA/SIF", "mandatory": True},
+            {"name": "Certificado de Habilitação do Estabelecimento", "issuer": "MAPA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise microbiológica e de resíduos veterinários", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 853/2004", "title": "Higiene para produtos de origem animal", "status": "active"},
+            {"code": "Reg. (CE) 854/2004", "title": "Controlo oficial de produtos de origem animal", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de medicamentos veterinários", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Estabelecimento habilitado MAPA para exportação à UE",
+            "SIF ativo",
+            "APPCC/HACCP",
+            "Cadeia fria ≤ -18°C",
+            "Plano de controle de resíduos veterinários (PNCRC/Aquicultura)",
+        ],
+        "max_residue_limits": {
+            "oxytetracycline": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL músculo de peixe."},
+            "malachite_green": {"limit": "0.002 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 1950/2006", "note": "Verde malaquita — banido. Detectado frequentemente em peixes de aquicultura."},
+            "chloramphenicol": {"limit": "0.0003 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 1950/2006", "note": "Tolerância zero na UE."},
+        },
+        "tariff_info": {"eu_tariff": "9%", "notes": "Brasil maior produtor de tilápia do mundo — forte competitividade no mercado italiano."},
+        "alerts": [
+            "🚫 Verde malaquita (malachite green) banido na UE — controlar tratamentos no viveiro",
+            "🌡️ Cadeia fria ≤ -18°C durante todo transporte e armazenagem",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 85, "level": "LOW"},
+            "regulatory": {"score": 80, "level": "MEDIUM"},
+            "logistics": {"score": 90, "level": "LOW"},
+            "market_access": {"score": 90, "level": "LOW"},
+        },
+    },
+
+    "carne_suina_congelada": {
+        "ncm_code": "0203.29.00",
+        "product_name": "Carne Suína Congelada (desossada)",
+        "product_name_it": "Carne di Maiale Congelata (disossata)",
+        "product_name_en": "Frozen Boneless Pork",
+        "category": "Carnes e Proteínas Animais",
+        "risk_score": 78,
+        "risk_level": "MEDIUM",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário Internacional (CSI)", "issuer": "MAPA/SIF", "mandatory": True},
+            {"name": "Certificado de Habilitação do Estabelecimento", "issuer": "MAPA", "mandatory": True},
+            {"name": "Certificado de Febre Aftosa (zona livre)", "issuer": "MAPA/PANAFTOSA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise de ractopamina (exigência UE)", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 853/2004", "title": "Higiene para produtos de origem animal", "status": "active"},
+            {"code": "Diretiva CE 96/22", "title": "Proibição de substâncias hormonais e agonistas beta", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de medicamentos veterinários", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Estabelecimento habilitado MAPA para exportação à UE",
+            "SIF ativo",
+            "Zona livre de Febre Aftosa sem vacinação (ou com vacinação, conforme acordo)",
+            "APPCC/HACCP",
+            "Cadeia fria ≤ -18°C",
+            "Proibição de ractopamina — não utilizada para exportação UE",
+        ],
+        "max_residue_limits": {
+            "ractopamine": {"limit": "0.000 mg/kg", "status": "BANIDO", "regulation": "Diretiva CE 96/22", "note": "Beta-agonista banido na UE. Brasil mantém linha produtiva separada para UE."},
+            "oxytetracycline": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL músculo suíno."},
+        },
+        "tariff_info": {"eu_tariff": "12.9% + €46.7/100kg", "notes": "Cotas TRQ com tarifa reduzida disponíveis. Verificar disponibilidade de cota."},
+        "alerts": [
+            "🚫 Ractopamina proibida na UE — confirmar rastreabilidade de toda a cadeia de produção",
+            "🐷 Exige certificado específico de zona livre de Febre Aftosa",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 75, "level": "MEDIUM"},
+            "regulatory": {"score": 75, "level": "MEDIUM"},
+            "logistics": {"score": 85, "level": "LOW"},
+            "market_access": {"score": 78, "level": "MEDIUM"},
+        },
+    },
+
+    "melao_fresco": {
+        "ncm_code": "0807.19.00",
+        "product_name": "Melão Fresco (Cantaloupe, Honeydew, Orange Flesh)",
+        "product_name_it": "Melone Fresco",
+        "product_name_en": "Fresh Melon",
+        "category": "Frutas Tropicais",
+        "risk_score": 85,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário", "issuer": "MAPA/SDA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise de Resíduos de Pesticidas", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (UE) 2019/1793", "title": "Controles reforçados na entrada", "status": "active"},
+            {"code": "Reg. (CE) 1148/2001", "title": "Normas de qualidade para frutas e hortícolas", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Pomar/área produtora registrada no MAPA",
+            "Certificado fitossanitário via ePhyto",
+            "Rastreabilidade de lote",
+            "Análise de resíduos (PNCRC)",
+        ],
+        "max_residue_limits": {
+            "imidacloprid": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/783", "note": "Banido. Melão do RN/CE frequentemente analisado no RASFF."},
+            "chlorpyrifos": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2020/18", "note": "Banido na UE desde 2020."},
+            "metalaxyl": {"limit": "0.05 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL para cucurbitáceas."},
+        },
+        "tariff_info": {"eu_tariff": "7.7% (jan-mar) / 0% (abr-out)", "notes": "Tarifa zero na janela principal da safra brasileira (out-mar) = vantagem competitiva."},
+        "alerts": [
+            "📅 Safra do Vale do São Francisco (RN/CE): nov-mar — coincide com janela de tarifa zero UE",
+            "⚠️ Chlorpyrifos banido na UE desde 2020 — retirar do protocolo de defensivos",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 88, "level": "LOW"},
+            "regulatory": {"score": 82, "level": "LOW"},
+            "logistics": {"score": 85, "level": "LOW"},
+            "market_access": {"score": 90, "level": "LOW"},
+        },
+    },
+
+    "uva_fresca_exportacao": {
+        "ncm_code": "0806.10.00",
+        "product_name": "Uva Fresca de Mesa (Brasil → Itália)",
+        "product_name_it": "Uva da Tavola Fresca (Brasile → Italia)",
+        "product_name_en": "Fresh Table Grapes (Brazil → Italy)",
+        "category": "Frutas Tropicais",
+        "risk_score": 80,
+        "risk_level": "MEDIUM",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "BR", "destination": "IT", "origin_name": "Brasil", "destination_name": "Itália"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário", "issuer": "MAPA/SDA", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio", "mandatory": True},
+            {"name": "Análise de Resíduos de Pesticidas", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (UE) 2019/1793", "title": "Controles reforçados na entrada", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Vinhedo/parreiral registrado no MAPA",
+            "Certificado fitossanitário emitido via ePhyto",
+            "Análise de Botrytis e Cryptosporella (pragas quarentenárias UE)",
+            "Análise de resíduos por lote",
+        ],
+        "max_residue_limits": {
+            "imidacloprid": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/783", "note": "Banido na UE."},
+            "iprodione": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 396/2005", "note": "Aprovação expirada na UE — MRL reduzido ao mínimo."},
+            "azoxystrobin": {"limit": "2.0 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL uva de mesa."},
+            "fludioxonil": {"limit": "2.0 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL uva de mesa."},
+        },
+        "tariff_info": {"eu_tariff": "0% (nov-jan) / 8-11.5% (restante)", "notes": "Safra Petrolina/Juazeiro (ago-mar) coincide com janela favorável."},
+        "alerts": [
+            "⚠️ Iprodione: MRL reduzido para 0.01 mg/kg na UE — substituir fungicida no protocolo",
+            "🍇 Sujeito a controles reforçados por Reg. 2019/1793",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 82, "level": "LOW"},
+            "regulatory": {"score": 75, "level": "MEDIUM"},
+            "logistics": {"score": 83, "level": "LOW"},
+            "market_access": {"score": 85, "level": "LOW"},
+        },
+    },
+
+    # =========================================================================
+    # ITÁLIA → BRASIL — FRESCOS E CONGELADOS
+    # Fonte: Italian Trade Agency (ICE), Nomisma/Agrifood Monitor 2023-2024
+    # Top produtos: maçã (+115.5%), tomate (+50.4%), pasta (+32.8%), mozzarella
+    # =========================================================================
+
+    "maca_italiana": {
+        "ncm_code": "0808.10.10",
+        "product_name": "Maçã Fresca Italiana (Golden, Fuji, Gala — importação)",
+        "product_name_it": "Mele Fresche Italiane (Alto Adige, Trentino)",
+        "product_name_en": "Fresh Italian Apples",
+        "category": "Frutas Temperadas",
+        "risk_score": 95,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário (país exportador)", "issuer": "MIPAAF / Servizio Fitosanitario", "mandatory": True},
+            {"name": "Licença de Importação (LPCO) — MAPA", "issuer": "MAPA Brasil", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+            {"name": "Análise de resíduos", "issuer": "Laboratório acreditado", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas na origem", "status": "active"},
+            {"code": "Reg. (UE) 2019/1793", "title": "Controles na saída de alimentos UE", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "LPCO obrigatória — aprovação pelo MAPA antes do embarque",
+            "Análise de pragas quarentenárias brasileiras (Cydia pomonella, Erwinia amylovora)",
+            "Embalagem aprovada e rastreável",
+            "Registro do importador no MAPA",
+            "Inspeção na chegada pelo SDA/VIGIAGRO",
+        ],
+        "max_residue_limits": {
+            "diphenylamine": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "Tratamento pós-colheita para maçã — limite aplicado."},
+            "chlorpyrifos": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2020/18", "note": "Banido na UE e com MRL mínimo — maçã italiana não utiliza."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 10% TEC", "notes": "Maçã italiana cresceu +115.5% nas exportações à Brasil em 2023. Alta demanda nos meses de escassez da produção nacional."},
+        "alerts": [
+            "📋 LPCO do MAPA obrigatória — solicitar com antecedência mínima de 30 dias",
+            "🍎 Maior crescimento de produto italiano para o Brasil em 2023 (+115.5%) — grande oportunidade",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 90, "level": "LOW"},
+            "regulatory": {"score": 92, "level": "LOW"},
+            "logistics": {"score": 88, "level": "LOW"},
+            "market_access": {"score": 95, "level": "LOW"},
+        },
+    },
+
+    "mozzarella_fresca": {
+        "ncm_code": "0406.10.10",
+        "product_name": "Mozzarella Fresca Italiana (importação)",
+        "product_name_it": "Mozzarella Fresca (Mozzarella di Bufala Campana DOP)",
+        "product_name_en": "Fresh Italian Mozzarella",
+        "category": "Laticínios e Derivados",
+        "risk_score": 88,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário (laticínio)", "issuer": "ASL (Azienda Sanitaria Locale) + MIPAAF", "mandatory": True},
+            {"name": "Certificado de Origem DOP (se aplicável)", "issuer": "Consorzio Mozzarella di Bufala Campana", "mandatory": False},
+            {"name": "Licença de Importação (LPCO) — MAPA", "issuer": "MAPA Brasil", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 853/2004", "title": "Higiene para produtos de origem animal na origem", "status": "active"},
+            {"code": "Reg. (UE) 1151/2012", "title": "Regimes de qualidade para produtos DOP/IGP", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "LPCO obrigatória pelo MAPA — laticínios estrangeiros",
+            "Estabelecimento italiano deve estar habilitado para exportação ao Brasil (lista MAPA)",
+            "Registro do produto no MAPA como produto de origem animal importado",
+            "Cadeia fria: 4-8°C (fresca) ou congelada para transporte",
+            "Rotulagem em português obrigatória (RDC 429/2020 ANVISA)",
+            "Registro ANVISA para comercialização no Brasil",
+        ],
+        "max_residue_limits": {
+            "aflatoxin_m1": {"limit": "0.05 µg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 1881/2006", "note": "LMR leite/laticínios — UE e Brasil alinhados."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 16% TEC para queijos", "notes": "Importação italiana de laticínios crescente no Brasil. Mozzarella di Bufala DOP tem alto valor agregado."},
+        "alerts": [
+            "📋 Estabelecimento italiano deve estar na lista positiva MAPA para exportação ao Brasil",
+            "🏷️ Rotulagem em português obrigatória antes de comercializar",
+            "❄️ Mozzarella fresca: cadeia fria 4-8°C; shelf life curto — logística reefer essencial",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 85, "level": "LOW"},
+            "regulatory": {"score": 88, "level": "LOW"},
+            "logistics": {"score": 75, "level": "MEDIUM"},
+            "market_access": {"score": 88, "level": "LOW"},
+        },
+    },
+
+    "parmigiano_reggiano": {
+        "ncm_code": "0406.90.20",
+        "product_name": "Parmigiano Reggiano / Grana Padano (importação)",
+        "product_name_it": "Parmigiano Reggiano DOP / Grana Padano DOP",
+        "product_name_en": "Parmigiano Reggiano / Grana Padano (import)",
+        "category": "Laticínios e Derivados",
+        "risk_score": 92,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário", "issuer": "ASL + MIPAAF", "mandatory": True},
+            {"name": "Certificado DOP", "issuer": "Consorzio Parmigiano Reggiano / Consorzio Grana Padano", "mandatory": True},
+            {"name": "LPCO — MAPA Brasil", "issuer": "MAPA Brasil", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (UE) 1151/2012", "title": "Regimes de qualidade para produtos DOP", "status": "active"},
+            {"code": "Reg. (CE) 853/2004", "title": "Higiene para produtos de origem animal", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "LPCO obrigatória pelo MAPA",
+            "Estabelecimento italiano habilitado para exportação ao Brasil",
+            "Registro do produto no MAPA",
+            "Rotulagem em português (RDC 429/2020)",
+            "Registro ANVISA para comercialização",
+            "Temperatura de transporte: ambiente controlado (8-15°C) para queijo curado",
+        ],
+        "max_residue_limits": {
+            "aflatoxin_m1": {"limit": "0.05 µg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 1881/2006", "note": "LMR leite/laticínios maturados."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 16% TEC", "notes": "Produto DOP com alto valor agregado. Demanda crescente nos segmentos premium e restauração italiana no Brasil."},
+        "alerts": [
+            "🏷️ Uso do nome DOP protegido — verificar conformidade de rotulagem",
+            "📋 Cadastro no MAPA obrigatório antes do primeiro embarque",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 88, "level": "LOW"},
+            "regulatory": {"score": 90, "level": "LOW"},
+            "logistics": {"score": 90, "level": "LOW"},
+            "market_access": {"score": 92, "level": "LOW"},
+        },
+    },
+
+    "prosciutto_di_parma": {
+        "ncm_code": "1601.00.90",
+        "product_name": "Prosciutto di Parma / San Daniele (importação)",
+        "product_name_it": "Prosciutto di Parma DOP / San Daniele DOP",
+        "product_name_en": "Prosciutto di Parma / San Daniele (import)",
+        "category": "Carnes e Frios Curados",
+        "risk_score": 88,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado Sanitário Internacional", "issuer": "MIPAAF / ASL", "mandatory": True},
+            {"name": "Certificado DOP", "issuer": "Consorzio Prosciutto di Parma / San Daniele", "mandatory": True},
+            {"name": "LPCO — MAPA Brasil", "issuer": "MAPA Brasil", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (UE) 1151/2012", "title": "Regimes de qualidade DOP/IGP", "status": "active"},
+            {"code": "Reg. (CE) 853/2004", "title": "Higiene para produtos de origem animal", "status": "active"},
+            {"code": "Reg. (CE) 1333/2008", "title": "Aditivos alimentares — nitratos/nitritos", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "LPCO obrigatória pelo MAPA",
+            "Estabelecimento italiano habilitado para exportação ao Brasil",
+            "Rotulagem em português — RDC 429/2020 + RDC 724/2022 (aditivos)",
+            "Registro do produto no MAPA",
+            "Verificar conformidade de nitratos e nitritos com limites ANVISA",
+        ],
+        "max_residue_limits": {
+            "nitrites": {"limit": "150 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 1333/2008", "note": "MRL UE para nitritos em presunto curado. ANVISA: verificar equivalência."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 10% TEC (embutidos)", "notes": "Itália é o maior fornecedor de presunto curado industrializado ao Brasil. Crescimento contínuo no canal alimentar e importadoras premium."},
+        "alerts": [
+            "🏷️ Denominação DOP protegida — não pode ser chamado de 'Prosciutto di Parma' sem certificação do Consórcio",
+            "⚗️ Verificar limites de nitratos/nitritos com ANVISA antes de comercializar",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 88, "level": "LOW"},
+            "regulatory": {"score": 88, "level": "LOW"},
+            "logistics": {"score": 92, "level": "LOW"},
+            "market_access": {"score": 90, "level": "LOW"},
+        },
+    },
+
+    "tomate_pelado_italiano": {
+        "ncm_code": "2002.10.00",
+        "product_name": "Tomate Pelado Italiano em Conserva (importação)",
+        "product_name_it": "Pomodori Pelati San Marzano / Pomodoro in Scatola",
+        "product_name_en": "Italian Peeled Tomatoes in Cans",
+        "category": "Hortícolas e Conservas",
+        "risk_score": 95,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+            {"name": "Nota Fiscal / Invoice Comercial", "issuer": "Exportador Italiano", "mandatory": True},
+            {"name": "Análise laboratorial (optional, exigida pela ANVISA se DI suspensa)", "issuer": "Laboratório acreditado", "mandatory": False},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 1881/2006", "title": "Contaminantes — limites para produtos processados", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "Registro ANVISA para alimentos processados importados",
+            "Rotulagem em português obrigatória (RDC 429/2020)",
+            "Verificação de aditivos alimentares conforme IN ANVISA 89/2021",
+            "Importação sem LPCO do MAPA (produto processado — competência ANVISA)",
+        ],
+        "max_residue_limits": {
+            "lycopene_natural": {"limit": "N/A", "status": "CONFORME", "regulation": "N/A", "note": "Composto natural do tomate — sem restrição."},
+            "tin_inorganic": {"limit": "200 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 1881/2006", "note": "Limite para produtos em embalagem metálica."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 14.4% TEC", "notes": "Tomate italiano (+50.4% exportações ao Brasil em 2023). San Marzano DOP tem alto diferencial de mercado."},
+        "alerts": [
+            "🏷️ Rotulagem em português obrigatória — importador responsável pela adequação",
+            "📋 Registro ANVISA obrigatório antes de comercializar no Brasil",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 92, "level": "LOW"},
+            "regulatory": {"score": 92, "level": "LOW"},
+            "logistics": {"score": 98, "level": "LOW"},
+            "market_access": {"score": 95, "level": "LOW"},
+        },
+    },
+
+    "trufa_fresca": {
+        "ncm_code": "0709.59.90",
+        "product_name": "Trufa Fresca / Congelada Italiana (importação)",
+        "product_name_it": "Tartufo Fresco / Congelato (Tartufo Nero di Norcia, Tartufo Bianco d'Alba)",
+        "product_name_en": "Fresh / Frozen Italian Truffles",
+        "category": "Cogumelos e Especiarias Premium",
+        "risk_score": 90,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário", "issuer": "Servizio Fitosanitario Regionale (Itália)", "mandatory": True},
+            {"name": "Certificado de Origem + espécie identificada", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+            {"name": "LPCO — MAPA Brasil (produto vegetal)", "issuer": "MAPA Brasil", "mandatory": True},
+            {"name": "Laudo de identificação taxonômica", "issuer": "Laboratório/especialista", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "LPCO do MAPA obrigatória — produto vegetal de origem animal (fungo)",
+            "Laudo de identificação da espécie (Tuber melanosporum, T. magnatum, etc.)",
+            "Inspeção do VIGIAGRO na chegada",
+            "Cadeia fria: 2-4°C (fresca) ou ≤ -18°C (congelada)",
+            "Shelf life muito curto para fresca — logística express aérea usualmente necessária",
+        ],
+        "max_residue_limits": {
+            "heavy_metals_generic": {"limit": "< padrão ANVISA", "status": "CONFORME", "regulation": "Reg. (CE) 1881/2006", "note": "Trufas não costumam apresentar contaminantes — produto premium de alto controle."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 6% TEC (cogumelos/trufas)", "notes": "Mercado de luxo. Tartufo Bianco d'Alba pode atingir €5.000/kg — exportação de altíssimo valor por kg."},
+        "alerts": [
+            "✈️ Trufa fresca: vida útil 5-10 dias — transporte aéreo expresso essencial",
+            "🔬 Laudo de identificação taxonômica obrigatório — risco de adulteração com espécies chinesas",
+            "📋 LPCO MAPA: solicitar com antecedência",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 82, "level": "LOW"},
+            "regulatory": {"score": 88, "level": "LOW"},
+            "logistics": {"score": 65, "level": "HIGH"},
+            "market_access": {"score": 92, "level": "LOW"},
+        },
+    },
+
+    "kiwi_fresco_italiano": {
+        "ncm_code": "0810.50.00",
+        "product_name": "Kiwi Fresco Italiano (importação)",
+        "product_name_it": "Kiwi Fresco (Hayward, Zespri Gold)",
+        "product_name_en": "Fresh Italian Kiwifruit",
+        "category": "Frutas Temperadas",
+        "risk_score": 93,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário", "issuer": "Servizio Fitosanitario (Itália)", "mandatory": True},
+            {"name": "LPCO — MAPA Brasil", "issuer": "MAPA Brasil", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "LPCO MAPA obrigatória",
+            "Análise de Pseudomonas syringae pv. actinidiae (Psa — praga quarentenária A1 no Brasil)",
+            "Inspeção VIGIAGRO na chegada",
+            "Cadeia fria: 0-4°C",
+        ],
+        "max_residue_limits": {
+            "acetamiprid": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL kiwi."},
+            "imidacloprid": {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/783", "note": "Banido UE — produtores italianos não utilizam."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 10% TEC", "notes": "Itália é 2º maior produtor mundial de kiwi. Abastece o Brasil no período de escassez da produção nacional (mai-set)."},
+        "alerts": [
+            "🔬 Psa (Pseudomonas syringae pv. actinidiae) é praga quarentenária A1 no Brasil — inspeção rigorosa",
+            "❄️ Cadeia fria 0-4°C obrigatória para manter qualidade e shelf life",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 90, "level": "LOW"},
+            "regulatory": {"score": 90, "level": "LOW"},
+            "logistics": {"score": 88, "level": "LOW"},
+            "market_access": {"score": 94, "level": "LOW"},
+        },
+    },
+
+    "pera_fresca_italiana": {
+        "ncm_code": "0808.30.00",
+        "product_name": "Pera Fresca Italiana (importação)",
+        "product_name_it": "Pere Fresche (Abate Fetel, William, Conference)",
+        "product_name_en": "Fresh Italian Pears",
+        "category": "Frutas Temperadas",
+        "risk_score": 93,
+        "risk_level": "LOW",
+        "status": "ZOI APPROVED",
+        "trade_route": {"origin": "IT", "destination": "BR", "origin_name": "Itália", "destination_name": "Brasil"},
+        "certificates_required": [
+            {"name": "Certificado Fitossanitário", "issuer": "Servizio Fitosanitario (Itália)", "mandatory": True},
+            {"name": "LPCO — MAPA Brasil", "issuer": "MAPA Brasil", "mandatory": True},
+            {"name": "Certificado de Origem", "issuer": "Câmara de Comércio Italiana", "mandatory": True},
+        ],
+        "eu_regulations": [
+            {"code": "Reg. (CE) 396/2005", "title": "LMR de pesticidas", "status": "active"},
+            {"code": "Reg. (CE) 178/2002", "title": "Segurança alimentar geral", "status": "active"},
+        ],
+        "brazilian_requirements": [
+            "LPCO MAPA obrigatória",
+            "Análise de pragas quarentenárias (Cydia pomonella, Erwinia amylovora)",
+            "Inspeção VIGIAGRO na chegada",
+            "Cadeia fria: 0-4°C",
+            "Categoria de qualidade conforme normas CEAGESP",
+        ],
+        "max_residue_limits": {
+            "diphenylamine": {"limit": "0.1 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "Tratamento pós-colheita anti-escaldo."},
+            "captan": {"limit": "3.0 mg/kg", "status": "CONFORME", "regulation": "Reg. (CE) 396/2005", "note": "MRL pera."},
+        },
+        "tariff_info": {"eu_tariff": "II Brasil: 10% TEC", "notes": "Emilia-Romagna é a principal região produtora. Abate Fetel, William e Conference dominam as importações brasileiras."},
+        "alerts": [
+            "📋 LPCO MAPA obrigatória — solicitar antes do embarque",
+            "🔬 Erwinia amylovora (fogo bacteriano) é praga quarentenária A1 no Brasil",
+        ],
+        "risk_factors": {
+            "documentation": {"score": 90, "level": "LOW"},
+            "regulatory": {"score": 90, "level": "LOW"},
+            "logistics": {"score": 88, "level": "LOW"},
+            "market_access": {"score": 93, "level": "LOW"},
+        },
+    },
 }
 
 SLUG_ALIASES = {
+    # Produtos existentes
     "soja": "soja_grao", "soja_graos": "soja_grao", "soybeans": "soja_grao",
     "açaí": "acai", "açai": "acai", "acai_polpa": "acai",
     "coffee": "cafe", "café": "cafe", "cafe_verde": "cafe",
+    # Brasil → Itália — novos
+    "carne_bovina": "carne_bovina_congelada", "beef": "carne_bovina_congelada", "bovina_congelada": "carne_bovina_congelada",
+    "frango": "frango_congelado", "chicken": "frango_congelado", "frango_partes": "frango_congelado",
+    "camaro": "camaro_congelado", "camarão": "camaro_congelado", "shrimp": "camaro_congelado",
+    "suco_laranja": "suco_laranja_congelado", "fcoj": "suco_laranja_congelado", "orange_juice": "suco_laranja_congelado",
+    "maracuja": "polpa_maracuja", "maracujá": "polpa_maracuja", "passion_fruit": "polpa_maracuja",
+    "manga": "manga_fresca", "mango": "manga_fresca",
+    "tilapia": "file_tilapia_congelado", "tilápia": "file_tilapia_congelado", "file_tilapia": "file_tilapia_congelado",
+    "carne_suina": "carne_suina_congelada", "suina": "carne_suina_congelada", "pork": "carne_suina_congelada",
+    "melao": "melao_fresco", "melão": "melao_fresco", "melon": "melao_fresco",
+    "uva": "uva_fresca_exportacao", "grape": "uva_fresca_exportacao",
+    # Itália → Brasil — novos
+    "maca": "maca_italiana", "maçã": "maca_italiana", "apple": "maca_italiana", "mele": "maca_italiana",
+    "mozzarella": "mozzarella_fresca", "mozarela": "mozzarella_fresca",
+    "parmigiano": "parmigiano_reggiano", "grana_padano": "parmigiano_reggiano", "parmesao": "parmigiano_reggiano",
+    "prosciutto": "prosciutto_di_parma", "presunto_italiano": "prosciutto_di_parma", "san_daniele": "prosciutto_di_parma",
+    "tomate_pelado": "tomate_pelado_italiano", "pelati": "tomate_pelado_italiano",
+    "trufa": "trufa_fresca", "tartufo": "trufa_fresca", "truffle": "trufa_fresca",
+    "kiwi": "kiwi_fresco_italiano",
+    "pera": "pera_fresca_italiana", "pear": "pera_fresca_italiana",
 }
 
 
@@ -824,9 +1488,9 @@ async def get_product_data(
     """
     Obtém dados de compliance. Hierarquia:
     1. Cache (se válido e não forçando refresh)
-    2. Manus AI em tempo real (pesquisa síncrona se refresh)
-    3. Knowledge base + dispara Manus em background
-    4. Template genérico + dispara Manus em background
+    2. Claude AI em tempo real (pesquisa síncrona se refresh)
+    3. Knowledge base + dispara Claude em background
+    4. Template genérico + dispara Claude em background
     """
     slug = normalize_slug(product_slug)
     product_name = product_slug.replace("_", " ").replace("-", " ").title()
@@ -839,13 +1503,13 @@ async def get_product_data(
             # ⚡ Revalida mesmo o cache — garante que dados antigos não sirvam erros
             return apply_regulatory_truth(cached)
 
-    # 2. Se refresh forçado ou Manus disponível, pesquisar SÍNCRONAMENTE
-    if force_refresh and MANUS_API_KEY:
-        logger.info(f"🔄 Forced refresh via Manus: {product_name}")
-        manus_result = await research_product_via_manus(slug, product_name)
-        if manus_result:
-            set_cached(slug, manus_result)
-            return manus_result
+    # 2. Se refresh forçado e Claude disponível, pesquisar SÍNCRONAMENTE
+    if force_refresh and ANTHROPIC_API_KEY:
+        logger.info(f"🔄 Forced refresh via Claude AI: {product_name}")
+        claude_result = await research_product_via_claude(slug, product_name)
+        if claude_result:
+            set_cached(slug, claude_result)
+            return claude_result
 
     # 3. Knowledge base (resposta imediata)
     if slug in REFERENCE_DATA:
@@ -853,29 +1517,29 @@ async def get_product_data(
         data["data_source"] = "reference_knowledge"
         data["needs_ai_update"] = True
         data["last_updated"] = datetime.now().isoformat()
-        data["data_source_note"] = "Dados de referência. Pesquisa IA em andamento..."
+        data["data_source_note"] = "Dados de referência. Pesquisa Claude IA em andamento..."
 
-        # Disparar Manus em BACKGROUND (não bloqueia resposta)
-        if MANUS_API_KEY and background_tasks:
-            background_tasks.add_task(background_manus_research, slug, product_name)
-            data["manus_research_status"] = "started_in_background"
+        # Disparar Claude em BACKGROUND (não bloqueia resposta)
+        if ANTHROPIC_API_KEY and background_tasks:
+            background_tasks.add_task(background_claude_research, slug, product_name)
+            data["claude_research_status"] = "started_in_background"
 
         # ⚡ Validação regulatória antes de cachear e retornar
         data = apply_regulatory_truth(data)
         set_cached(slug, data)
         return data
 
-    # 4. Produto DESCONHECIDO - template + Manus background
+    # 4. Produto DESCONHECIDO - template + Claude background
     data = make_unknown_product_template(product_name)
     data["last_updated"] = datetime.now().isoformat()
-    
-    if MANUS_API_KEY and background_tasks:
-        background_tasks.add_task(background_manus_research, slug, product_name)
-        data["manus_research_status"] = "started_in_background"
-        data["alerts"][0] = f"🔍 Pesquisa IA iniciada para '{product_name}' via Manus AI..."
-    elif not MANUS_API_KEY:
-        data["alerts"].append("⚠️ Manus AI não configurado. Configure MANUS_API_KEY no Render.")
-    
+
+    if ANTHROPIC_API_KEY and background_tasks:
+        background_tasks.add_task(background_claude_research, slug, product_name)
+        data["claude_research_status"] = "started_in_background"
+        data["alerts"][0] = f"🔍 Pesquisa Claude IA iniciada para '{product_name}'..."
+    elif not ANTHROPIC_API_KEY:
+        data["alerts"].append("⚠️ Claude AI não configurado. Configure ANTHROPIC_API_KEY no Render.")
+
     return data
 
 
@@ -983,15 +1647,15 @@ def generate_compliance_pdf(product: Dict) -> bytes:
         # Footer
         source = product.get("data_source", "unknown")
         source_labels = {
-            "manus_ai_realtime": "Pesquisa IA em Tempo Real (Manus AI)",
-            "reference_knowledge": "Base de Referência",
+            "claude_ai_realtime": "Pesquisa IA em Tempo Real (Claude AI — Anthropic)",
+            "reference_knowledge": "Base de Referência ZOI",
             "cache": "Cache",
             "template_pending_research": "Template (pesquisa pendente)",
         }
         c.setFillColor(GRAY)
         c.setFont("Helvetica", 7)
         c.drawString(1.5*cm, 1*cm,
-            f"ZOI Sentinel v4.2 | Gerado: {datetime.now().strftime('%d/%m/%Y %H:%M')} | "
+            f"ZOI Sentinel v5.0 | Gerado: {datetime.now().strftime('%d/%m/%Y %H:%M')} | "
             f"Fonte: {source_labels.get(source, source)}")
         c.drawRightString(w - 1.5*cm, 1*cm, "© ZOI Trade Advisory")
 
@@ -1019,10 +1683,11 @@ def generate_compliance_pdf(product: Dict) -> bytes:
 @app.get("/")
 async def root():
     return {
-        "service": "ZOI Sentinel v4.2",
+        "service": "ZOI Sentinel v5.0",
         "architecture": "zero_database",
-        "ai_engine": "manus_ai",
-        "manus_configured": bool(MANUS_API_KEY),
+        "ai_engine": "claude_ai_anthropic",
+        "claude_configured": bool(ANTHROPIC_API_KEY),
+        "claude_model": CLAUDE_MODEL,
         "endpoints": {
             "get_product": "GET /api/products/{slug}",
             "export_pdf": "GET /api/products/{slug}/export-pdf",
@@ -1038,13 +1703,12 @@ async def root():
 async def health():
     return {
         "status": "healthy",
-        "version": "4.2.0",
+        "version": "5.0.0",
         "architecture": "zero_database",
-        "manus_ai": "configured" if MANUS_API_KEY else "NOT_CONFIGURED",
-        "manus_profile": MANUS_AGENT_PROFILE,
-        "manus_task_mode": MANUS_TASK_MODE,
+        "claude_ai": "configured" if ANTHROPIC_API_KEY else "NOT_CONFIGURED",
+        "claude_model": CLAUDE_MODEL,
         "cache_size": len(PRODUCT_CACHE),
-        "active_research": len([t for t in MANUS_TASKS.values() if t.get("status") == "running"]),
+        "active_research": len([t for t in CLAUDE_RESEARCH_TASKS.values() if t.get("status") == "running"]),
         "known_products": len(REFERENCE_DATA),
         "timestamp": datetime.now().isoformat(),
     }
@@ -1061,25 +1725,26 @@ async def list_products():
             "category": data["category"],
             "risk_score": data["risk_score"],
             "status": data["status"],
+            "trade_route": data.get("trade_route", {}),
         })
     return {
         "success": True,
         "products": products,
         "total": len(products),
-        "note": "Qualquer produto pode ser pesquisado - produtos não listados serão pesquisados via Manus AI.",
+        "note": "Qualquer produto pode ser pesquisado — não listados serão pesquisados via Claude AI.",
     }
 
 
 @app.get("/api/products/{product_slug}")
 async def get_product(product_slug: str, background_tasks: BackgroundTasks):
-    """Retorna dados de compliance. Dispara Manus AI em background se necessário."""
+    """Retorna dados de compliance. Dispara Claude AI em background se necessário."""
     logger.info(f"📦 PRODUCT REQUEST: {product_slug}")
     product_data = await get_product_data(product_slug, background_tasks=background_tasks)
     return {
         "success": True,
         "product": product_data,
-        "architecture": "zero_database_v4",
-        "ai_engine": "manus_ai" if MANUS_API_KEY else "reference_only",
+        "architecture": "zero_database_v5",
+        "ai_engine": "claude_ai" if ANTHROPIC_API_KEY else "reference_only",
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -1110,11 +1775,11 @@ async def export_pdf(product_slug: str, background_tasks: BackgroundTasks):
 @app.get("/api/products/{product_slug}/refresh")
 async def refresh_product(product_slug: str):
     """
-    Força pesquisa síncrona via Manus AI.
-    Espera o resultado (até 3 min) e retorna dados atualizados.
+    Força pesquisa síncrona via Claude AI.
+    Retorna dados atualizados em ~20-40s (vs 60-120s do Manus anterior).
     Chamado quando usuário clica 'Atualizar via IA'.
     """
-    logger.info(f"🔄 REFRESH (sync Manus): {product_slug}")
+    logger.info(f"🔄 REFRESH (sync Claude AI): {product_slug}")
     product_data = await get_product_data(product_slug, force_refresh=True)
     return {
         "success": True,
@@ -1127,25 +1792,26 @@ async def refresh_product(product_slug: str):
 
 @app.get("/api/research-status/{product_slug}")
 async def research_status(product_slug: str):
-    """Verifica o status de uma pesquisa Manus em andamento."""
+    """Verifica o status de uma pesquisa Claude AI em andamento."""
     slug = normalize_slug(product_slug)
 
-    task_info = MANUS_TASKS.get(slug, {})
+    task_info = CLAUDE_RESEARCH_TASKS.get(slug, {})
     cached = get_cached(slug)
 
-    # Se tem cache com dados do Manus, pesquisa já completou
-    if cached and cached.get("data_source") == "manus_ai_realtime":
+    # Se tem cache com dados do Claude, pesquisa já completou
+    if cached and cached.get("data_source") == "claude_ai_realtime":
         return {
             "slug": slug,
             "research_complete": True,
-            "data_source": "manus_ai_realtime",
+            "data_source": "claude_ai_realtime",
+            "claude_model": cached.get("claude_model", CLAUDE_MODEL),
             "last_updated": cached.get("last_updated"),
         }
 
     return {
         "slug": slug,
         "research_complete": False,
-        "manus_task": task_info,
+        "claude_task": task_info,
         "has_cache": cached is not None,
         "cache_source": cached.get("data_source") if cached else None,
     }
@@ -1174,13 +1840,13 @@ async def preflight(request: Request, rest_of_path: str):
 @app.on_event("startup")
 async def startup():
     logger.info("=" * 70)
-    logger.info("🚀 ZOI SENTINEL v4.2 - Zero Database + Manus AI")
-    logger.info(f"📡 Manus AI: {'✅ CONFIGURED' if MANUS_API_KEY else '❌ NOT CONFIGURED'}")
-    logger.info(f"🤖 Agent Profile: {MANUS_AGENT_PROFILE} | Mode: {MANUS_TASK_MODE}")
+    logger.info("🚀 ZOI SENTINEL v5.0 - Zero Database + Claude AI (Anthropic)")
+    logger.info(f"🤖 Claude AI: {'✅ CONFIGURED' if ANTHROPIC_API_KEY else '❌ NOT CONFIGURED'}")
+    logger.info(f"🧠 Model: {CLAUDE_MODEL}")
     logger.info(f"📦 Reference products: {len(REFERENCE_DATA)}")
     logger.info(f"🌐 CORS origins: {len(ALLOWED_ORIGINS)}")
-    if not MANUS_API_KEY:
-        logger.warning("⚠️ Configure MANUS_API_KEY no Render para ativar pesquisa em tempo real!")
+    if not ANTHROPIC_API_KEY:
+        logger.warning("⚠️ Configure ANTHROPIC_API_KEY no Render para ativar pesquisa em tempo real!")
     logger.info("=" * 70)
 
 
