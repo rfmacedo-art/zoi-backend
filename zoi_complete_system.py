@@ -127,8 +127,84 @@ MANUS_POLL_MAX_WAIT = 300     # max seconds to wait (5 min - Manus agent navega 
 
 
 # ============================================================================
-# IN-MEMORY CACHE
+# REGULATORY TRUTH LAYER
+# Valida e corrige dados retornados pelo Manus antes de servir ao frontend.
+# Esta camada garante que substâncias banidas na UE nunca apareçam como
+# "Conforme", independente do que o Manus ou o cache retornarem.
+# Fonte verificada: EUR-Lex, EFSA, Reg. (CE) 396/2005 — Fev/2026
 # ============================================================================
+
+EU_BANNED_SUBSTANCES = {
+    "carbendazim":   {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. (CE) 396/2005", "note": "Banido na UE — mutagênico e tóxico para reprodução."},
+    "imidacloprid":  {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/783", "note": "Banido na UE desde 2018 — neonicotinoide."},
+    "thiamethoxam":  {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/785", "note": "Banido na UE desde 2018 — neonicotinoide."},
+    "clothianidin":  {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. Impl. (UE) 2018/784", "note": "Banido na UE desde 2018 — neonicotinoide."},
+    "thiacloprid":   {"limit": "0.01 mg/kg", "status": "BANIDO", "regulation": "Reg. (UE) 2020/23",   "note": "Aprovação não renovada — banido desde Fev/2020."},
+}
+
+def apply_regulatory_truth(data: Dict) -> Dict:
+    """
+    Pós-processamento obrigatório em TODOS os dados antes de servir ao frontend.
+    Corrige erros de alucinação do Manus sobre substâncias banidas na UE.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    mrl = data.get("max_residue_limits", {})
+    if not isinstance(mrl, dict):
+        return data
+
+    has_banned = False
+    corrected = False
+
+    for substance_key, substance_data in mrl.items():
+        normalized = substance_key.lower().replace("-", "").replace("_", "").replace(" ", "")
+        for banned_key, banned_truth in EU_BANNED_SUBSTANCES.items():
+            if banned_key.replace("-", "") in normalized or normalized in banned_key.replace("-", ""):
+                if isinstance(substance_data, dict):
+                    original_status = substance_data.get("status", "")
+                    if original_status != "BANIDO":
+                        logger.warning(
+                            f"⚠️ REGULATORY CORRECTION: '{substance_key}' estava como '{original_status}' "
+                            f"mas é BANIDO na UE. Corrigindo automaticamente."
+                        )
+                        corrected = True
+                    mrl[substance_key] = {**substance_data, **banned_truth}
+                else:
+                    mrl[substance_key] = banned_truth
+                    corrected = True
+                has_banned = True
+                break
+
+    if has_banned:
+        # Recalcular taxa de conformidade
+        total = len(mrl)
+        banned_count = sum(1 for v in mrl.values() if isinstance(v, dict) and v.get("status") == "BANIDO")
+        conformity_pct = int(((total - banned_count) / total) * 100) if total > 0 else 100
+
+        # Status não pode ser APPROVED se há substâncias banidas
+        current_status = data.get("status", "")
+        if banned_count > 0 and "APPROVED" in current_status.upper():
+            data["status"] = "REQUIRES ATTENTION"
+            logger.warning(f"⚠️ STATUS CORRECTION: produto tinha '{current_status}' mas tem {banned_count} substância(s) BANIDA(s). Corrigido para 'REQUIRES ATTENTION'.")
+
+        # Risk score não pode ser alto se há substâncias banidas
+        if banned_count > 0:
+            max_allowed_score = 79
+            if data.get("risk_score", 0) > max_allowed_score:
+                data["risk_score"] = max_allowed_score
+
+        data["lmr_conformity_pct"] = conformity_pct
+        data["lmr_banned_count"] = banned_count
+
+    if corrected:
+        data["regulatory_correction_applied"] = True
+
+    data["max_residue_limits"] = mrl
+    return data
+
+
+
 PRODUCT_CACHE: Dict[str, Dict[str, Any]] = {}
 MANUS_TASKS: Dict[str, Dict[str, Any]] = {}  # track ongoing Manus tasks per product
 
@@ -158,15 +234,24 @@ def set_cached(slug: str, data: Dict):
 def build_compliance_prompt(product_name: str) -> str:
     """
     Prompt otimizado para o Manus pesquisar compliance de exportação.
-    Mais curto = Manus processa mais rápido.
+    Inclui lista de substâncias banidas para evitar alucinações.
     """
     return f"""Pesquise compliance para exportação de "{product_name}" do Brasil para Itália/UE.
 
 Consulte: MAPA (mapa.gov.br), ANVISA, Receita Federal (NCM), EUR-Lex, RASFF.
 
+ATENÇÃO — SUBSTÂNCIAS BANIDAS NA UE (MRL = 0.01 mg/kg, tolerância zero):
+- Carbendazim: BANIDO — mutagênico/tóxico para reprodução
+- Imidacloprid: BANIDO — neonicotinoide, Reg. 2018/783
+- Thiamethoxam: BANIDO — neonicotinoide, Reg. 2018/785
+- Clothianidin: BANIDO — neonicotinoide, Reg. 2018/784
+- Thiacloprid: BANIDO — aprovação expirada 2020
+Se qualquer dessas substâncias for detectada, status deve ser "BANIDO" e limit "0.01 mg/kg".
+NUNCA classifique substâncias banidas como "Conforme".
+
 Retorne APENAS um JSON válido (sem texto extra) com esta estrutura:
 {{
-    "ncm_code": "código NCM",
+    "ncm_code": "código NCM correto para a forma exportada (polpa congelada ≠ fruta fresca)",
     "product_name": "{product_name}",
     "product_name_it": "nome em italiano",
     "product_name_en": "nome em inglês",
@@ -177,7 +262,14 @@ Retorne APENAS um JSON válido (sem texto extra) com esta estrutura:
     "certificates_required": [{{"name": "...", "issuer": "...", "mandatory": true}}],
     "eu_regulations": [{{"code": "Reg. ...", "title": "...", "status": "active"}}],
     "brazilian_requirements": ["requisito 1", "requisito 2"],
-    "max_residue_limits": {{"substancia": {{"limit": "valor", "regulation": "reg."}}}},
+    "max_residue_limits": {{
+        "substancia": {{
+            "limit": "X mg/kg",
+            "status": "BANIDO ou CONFORME",
+            "regulation": "Reg. aplicável",
+            "note": "explicação"
+        }}
+    }},
     "tariff_info": {{"eu_tariff": "X%", "notes": "..."}},
     "alerts": ["alerta 1"],
     "sources_consulted": ["url1", "url2"]
@@ -469,6 +561,9 @@ async def research_product_via_manus(product_slug: str, product_name: str) -> Op
             "origin": "BR", "destination": "IT",
             "origin_name": "Brasil", "destination_name": "Itália"
         })
+
+        # ⚡ VALIDAÇÃO REGULATÓRIA — corrige alucinações do Manus sobre banidos
+        compliance_data = apply_regulatory_truth(compliance_data)
         
         MANUS_TASKS[product_slug]["status"] = "completed"
         logger.info(f"✅ MANUS RESEARCH COMPLETE: {product_name}")
@@ -549,7 +644,7 @@ REFERENCE_DATA = {
         },
     },
     "acai": {
-        "ncm_code": "0810.90.00",
+        "ncm_code": "0811.90.10",  # Polpa congelada - CORRETO. 0810.90.00 seria fruta fresca.
         "product_name": "Açaí (Polpa/Fruto)",
         "product_name_it": "Açaí (Polpa/Frutto)",
         "product_name_en": "Açaí Berry (Pulp/Fruit)",
@@ -570,6 +665,7 @@ REFERENCE_DATA = {
             {"code": "Reg. (CE) 396/2005", "title": "Limites máximos de resíduos de pesticidas", "status": "active"},
             {"code": "Reg. (UE) 1169/2011", "title": "Rotulagem de alimentos", "status": "active"},
             {"code": "Reg. (CE) 852/2004", "title": "Higiene dos gêneros alimentícios", "status": "active"},
+            {"code": "Reg. (UE) 2019/1793", "title": "Controles reforçados na entrada de alimentos de países terceiros", "status": "active"},
         ],
         "brazilian_requirements": [
             "Registro no MAPA/SIF",
@@ -578,7 +674,46 @@ REFERENCE_DATA = {
             "Controle de cadeia fria (-18°C para polpa congelada)",
             "APPCC/HACCP implementado",
         ],
-        "max_residue_limits": {},
+        "max_residue_limits": {
+            # SUBSTÂNCIAS BANIDAS NA UE — MRL = 0.01 mg/kg (tolerância zero)
+            # Fonte: Reg. Impl. (UE) 2018/783, 2018/784, 2018/785 + Reg. 396/2005
+            "carbendazim": {
+                "limit": "0.01 mg/kg",
+                "status": "BANIDO",
+                "regulation": "Reg. (CE) 396/2005",
+                "note": "Banido na UE — mutagênico e tóxico para reprodução. Tolerância zero."
+            },
+            "imidacloprid": {
+                "limit": "0.01 mg/kg",
+                "status": "BANIDO",
+                "regulation": "Reg. Impl. (UE) 2018/783",
+                "note": "Banido na UE desde 2018 — neonicotinoide neurotóxico para abelhas."
+            },
+            "thiamethoxam": {
+                "limit": "0.01 mg/kg",
+                "status": "BANIDO",
+                "regulation": "Reg. Impl. (UE) 2018/785",
+                "note": "Banido na UE desde 2018 — neonicotinoide neurotóxico para abelhas."
+            },
+            "clothianidin": {
+                "limit": "0.01 mg/kg",
+                "status": "BANIDO",
+                "regulation": "Reg. Impl. (UE) 2018/784",
+                "note": "Banido na UE desde 2018 — neonicotinoide neurotóxico para abelhas."
+            },
+            "glyphosate": {
+                "limit": "0.1 mg/kg",
+                "status": "CONFORME",
+                "regulation": "Reg. (CE) 396/2005",
+                "note": "MRL 0.1 mg/kg para frutas — posição NCM 08."
+            },
+            "cypermethrin": {
+                "limit": "0.05 mg/kg",
+                "status": "CONFORME",
+                "regulation": "Reg. (CE) 396/2005",
+                "note": "MRL 0.05 mg/kg para frutas — posição NCM 08."
+            },
+        },
         "tariff_info": {"eu_tariff": "8.8%", "notes": "Tarifa para frutas tropicais"},
         "alerts": ["⚠️ Atenção à cadeia fria - açaí é altamente perecível"],
         "risk_factors": {
@@ -701,7 +836,8 @@ async def get_product_data(
         cached = get_cached(slug)
         if cached:
             cached["data_source_note"] = "Dados em cache"
-            return cached
+            # ⚡ Revalida mesmo o cache — garante que dados antigos não sirvam erros
+            return apply_regulatory_truth(cached)
 
     # 2. Se refresh forçado ou Manus disponível, pesquisar SÍNCRONAMENTE
     if force_refresh and MANUS_API_KEY:
@@ -718,12 +854,14 @@ async def get_product_data(
         data["needs_ai_update"] = True
         data["last_updated"] = datetime.now().isoformat()
         data["data_source_note"] = "Dados de referência. Pesquisa IA em andamento..."
-        
+
         # Disparar Manus em BACKGROUND (não bloqueia resposta)
         if MANUS_API_KEY and background_tasks:
             background_tasks.add_task(background_manus_research, slug, product_name)
             data["manus_research_status"] = "started_in_background"
-        
+
+        # ⚡ Validação regulatória antes de cachear e retornar
+        data = apply_regulatory_truth(data)
         set_cached(slug, data)
         return data
 
