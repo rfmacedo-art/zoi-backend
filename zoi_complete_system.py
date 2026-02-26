@@ -274,18 +274,67 @@ Retorne APENAS o JSON abaixo, sem texto adicional, sem markdown, sem backticks:
 }}"""
 
 
+def _extract_text_from_blocks(content_blocks) -> str:
+    """Extrai todo o texto dos blocos de conteúdo de uma resposta Claude."""
+    text = ""
+    for block in content_blocks:
+        if hasattr(block, "text") and block.text:
+            text += block.text
+    return text
+
+
+def _parse_compliance_json(text_content: str) -> Optional[Dict]:
+    """Tenta parsear JSON de compliance do texto retornado pelo Claude."""
+    import re
+
+    # 1. JSON direto (ideal — sem markdown)
+    try:
+        data = json.loads(text_content.strip())
+        if isinstance(data, dict) and "ncm_code" in data:
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Bloco ```json ... ```
+    match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text_content)
+    if match:
+        try:
+            data = json.loads(match.group(1).strip())
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Objeto JSON inline no texto (fallback)
+    match = re.search(r'(\{[\s\S]*?"ncm_code"[\s\S]*?\})\s*$', text_content)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 async def research_product_via_claude(product_slug: str, product_name: str) -> Optional[Dict]:
     """
-    Pesquisa compliance via Claude API com web_search tool nativa.
-    Substitui completamente a integração Manus (sem polling, sem task_id).
-    Tempo típico: 15-40s vs 60-120s do Manus.
+    Pesquisa compliance via Claude API com loop agêntico para web_search.
+
+    Fluxo correto da API Anthropic com tools:
+    1. Enviamos prompt com tool web_search disponível
+    2. Claude responde com stop_reason="tool_use" — contém blocos tool_use (chamadas de busca)
+    3. Nós coletamos os blocos tool_use e enviamos de volta como tool_result (conteúdo = string vazia,
+       pois web_search_20250305 é server-side — o resultado já está implícito no contexto)
+    4. Claude responde com stop_reason="end_turn" e o texto final com o JSON
+    5. Se após MAX_TURNS ainda não houver texto, cai no fallback sem web_search
     """
     if not ANTHROPIC_API_KEY:
         logger.warning("⚠️ ANTHROPIC_API_KEY não configurada")
         return None
 
     logger.info(f"🤖 CLAUDE RESEARCH START: {product_name}")
-
     CLAUDE_RESEARCH_TASKS[product_slug] = {
         "status": "running",
         "started_at": datetime.now().isoformat(),
@@ -297,57 +346,88 @@ async def research_product_via_claude(product_slug: str, product_name: str) -> O
             timeout=CLAUDE_RESEARCH_TIMEOUT,
         )
 
-        response = await client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=4096,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": build_compliance_prompt(product_name)}],
-        )
-
-        # Extrair texto da resposta (pode ter blocos tool_use + text)
+        messages = [{"role": "user", "content": build_compliance_prompt(product_name)}]
+        tools = [{"type": "web_search_20250305", "name": "web_search"}]
+        MAX_TURNS = 8  # segurança contra loop infinito
         text_content = ""
-        for block in response.content:
-            if hasattr(block, "text") and block.text:
-                text_content += block.text
 
-        logger.info(f"📝 Claude response preview ({len(text_content)} chars): {text_content[:200]}")
+        for turn in range(MAX_TURNS):
+            logger.info(f"🔄 Claude turn {turn + 1}/{MAX_TURNS} para: {product_name}")
 
-        if not text_content.strip():
-            logger.warning(f"⚠️ Claude retornou resposta vazia para: {product_name}")
-            CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "empty_response"
-            return None
+            response = await client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=4096,
+                tools=tools,
+                messages=messages,
+            )
 
-        # Parse JSON — Claude é muito mais preciso que Manus, geralmente retorna JSON direto
-        import re
-        compliance_data = None
+            logger.info(f"   stop_reason={response.stop_reason} | blocos={len(response.content)}")
 
-        # 1. Tentar JSON direto
-        try:
-            compliance_data = json.loads(text_content.strip())
-        except json.JSONDecodeError:
-            pass
+            # Coletar texto desta resposta
+            turn_text = _extract_text_from_blocks(response.content)
+            if turn_text:
+                text_content += turn_text
+                logger.info(f"   texto acumulado: {len(text_content)} chars")
 
-        # 2. Extrair de bloco ```json``` se houver
+            # Se parou por end_turn — temos a resposta final
+            if response.stop_reason == "end_turn":
+                logger.info(f"✅ Claude finalizou em {turn + 1} turno(s)")
+                break
+
+            # Se parou por tool_use — precisamos continuar o loop
+            if response.stop_reason == "tool_use":
+                # Adicionar a resposta do assistente ao histórico
+                messages.append({"role": "assistant", "content": response.content})
+
+                # Construir tool_result para cada bloco tool_use
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        logger.info(f"   🔍 web_search chamado: {getattr(block, 'input', {})}")
+                        # web_search_20250305 é server-side: o resultado já foi processado
+                        # internamente pela Anthropic. Enviamos tool_result vazio para continuar.
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": "",
+                        })
+
+                if tool_results:
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    # Nenhum tool_use encontrado mas stop_reason=tool_use — situação inesperada
+                    logger.warning("   ⚠️ stop_reason=tool_use mas nenhum bloco tool_use encontrado")
+                    break
+                continue
+
+            # Outro stop_reason (max_tokens, error...) — sair
+            logger.warning(f"   ⚠️ stop_reason inesperado: {response.stop_reason}")
+            break
+
+        # ── Tentativa de parse do JSON ──────────────────────────────────────
+        logger.info(f"📝 Texto total coletado: {len(text_content)} chars")
+        logger.info(f"   Preview: {text_content[:300]}")
+
+        compliance_data = _parse_compliance_json(text_content) if text_content.strip() else None
+
+        # ── Fallback: chamar Claude SEM web_search usando só conhecimento interno ──
         if not compliance_data:
-            match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text_content)
-            if match:
-                try:
-                    compliance_data = json.loads(match.group(1).strip())
-                except json.JSONDecodeError:
-                    pass
-
-        # 3. Extrair objeto JSON do texto (fallback)
-        if not compliance_data:
-            match = re.search(r'(\{[\s\S]*"ncm_code"[\s\S]*\})', text_content)
-            if match:
-                try:
-                    compliance_data = json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    pass
+            logger.warning(f"⚠️ Loop com web_search não produziu JSON. Tentando fallback sem web_search...")
+            fallback_response = await client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=4096,
+                messages=[{
+                    "role": "user",
+                    "content": build_compliance_prompt(product_name) +
+                        "\n\nIMPORTANTE: Use seu conhecimento interno de treinamento. Retorne APENAS o JSON, sem texto adicional."
+                }],
+            )
+            fallback_text = _extract_text_from_blocks(fallback_response.content)
+            logger.info(f"   Fallback texto: {len(fallback_text)} chars | preview: {fallback_text[:200]}")
+            compliance_data = _parse_compliance_json(fallback_text)
 
         if not compliance_data or not isinstance(compliance_data, dict):
-            logger.warning(f"⚠️ Claude não retornou JSON válido para: {product_name}")
-            logger.warning(f"   Conteúdo recebido: {text_content[:400]}")
+            logger.warning(f"⚠️ Claude não produziu JSON válido para: {product_name}")
             CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "parse_error"
             return None
 
@@ -361,7 +441,7 @@ async def research_product_via_claude(product_slug: str, product_name: str) -> O
             "origin_name": "Brasil", "destination_name": "Itália"
         })
 
-        # ⚡ VALIDAÇÃO REGULATÓRIA — garante que banidos sejam sempre banidos
+        # ⚡ VALIDAÇÃO REGULATÓRIA
         compliance_data = apply_regulatory_truth(compliance_data)
 
         CLAUDE_RESEARCH_TASKS[product_slug]["status"] = "completed"
@@ -1517,12 +1597,12 @@ async def get_product_data(
         data["data_source"] = "reference_knowledge"
         data["needs_ai_update"] = True
         data["last_updated"] = datetime.now().isoformat()
-        data["data_source_note"] = "Dados de referência. Pesquisa Claude IA em andamento..."
+        data["data_source_note"] = "Dados de referência verificados. Clique 'Atualizar via IA' para pesquisa em tempo real."
 
-        # Disparar Claude em BACKGROUND (não bloqueia resposta)
-        if ANTHROPIC_API_KEY and background_tasks:
-            background_tasks.add_task(background_claude_research, slug, product_name)
-            data["claude_research_status"] = "started_in_background"
+        # ⚡ NÃO dispara Claude em background para produtos conhecidos.
+        # Os dados do REFERENCE_DATA já são verificados e confiáveis.
+        # Claude só é chamado quando o usuário clica explicitamente em "Atualizar via IA" (/refresh).
+        # Isso evita custos desnecessários de tokens a cada expiração de cache.
 
         # ⚡ Validação regulatória antes de cachear e retornar
         data = apply_regulatory_truth(data)
@@ -1530,6 +1610,7 @@ async def get_product_data(
         return data
 
     # 4. Produto DESCONHECIDO - template + Claude background
+    # Para produtos fora do REFERENCE_DATA, Claude é necessário pois não temos dados.
     data = make_unknown_product_template(product_name)
     data["last_updated"] = datetime.now().isoformat()
 
